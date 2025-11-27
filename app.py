@@ -1,0 +1,287 @@
+import os
+import urllib
+import pandas as pd
+import sqlalchemy
+import streamlit as st
+import streamlit.components.v1 as components
+from dotenv import load_dotenv
+
+load_dotenv()
+
+st.set_page_config(page_title="National Parks Intelligence", layout="wide")
+
+# Hardcoded Tableau embed snippet (paste your full embed HTML/JS here)
+TABLEAU_EMBED_HTML = """
+<div class='tableauPlaceholder' id='viz1764260932811' style='position: relative'><noscript><a href='#'><img alt=' ' src='https:&#47;&#47;public.tableau.com&#47;static&#47;images&#47;US&#47;USNationalParksDashboard_17642532718610&#47;NPIntelligentsystem&#47;1_rss.png' style='border: none' /></a></noscript><object class='tableauViz'  style='display:none;'><param name='host_url' value='https%3A%2F%2Fpublic.tableau.com%2F' /> <param name='embed_code_version' value='3' /> <param name='site_root' value='' /><param name='name' value='USNationalParksDashboard_17642532718610&#47;NPIntelligentsystem' /><param name='tabs' value='yes' /><param name='toolbar' value='yes' /><param name='static_image' value='https:&#47;&#47;public.tableau.com&#47;static&#47;images&#47;US&#47;USNationalParksDashboard_17642532718610&#47;NPIntelligentsystem&#47;1.png' /> <param name='animate_transition' value='yes' /><param name='display_static_image' value='yes' /><param name='display_spinner' value='yes' /><param name='display_overlay' value='yes' /><param name='display_count' value='yes' /><param name='language' value='en-US' /><param name='filter' value='publish=yes' /></object></div>                <script type='text/javascript'>                    var divElement = document.getElementById('viz1764260932811');                    var vizElement = divElement.getElementsByTagName('object')[0];                    if ( divElement.offsetWidth > 800 ) { vizElement.style.minWidth='1400px';vizElement.style.maxWidth='100%';vizElement.style.minHeight='1550px';vizElement.style.maxHeight=(divElement.offsetWidth*0.75)+'px';} else if ( divElement.offsetWidth > 500 ) { vizElement.style.minWidth='1400px';vizElement.style.maxWidth='100%';vizElement.style.minHeight='1550px';vizElement.style.maxHeight=(divElement.offsetWidth*0.75)+'px';} else { vizElement.style.width='100%';vizElement.style.minHeight='2450px';vizElement.style.maxHeight=(divElement.offsetWidth*1.77)+'px';}                     var scriptElement = document.createElement('script');                    scriptElement.src = 'https://public.tableau.com/javascripts/api/viz_v1.js';                    vizElement.parentNode.insertBefore(scriptElement, vizElement);                </script>
+"""
+
+
+def get_db_config():
+    server = os.getenv("DB_SERVER")
+    database = os.getenv("DB_DATABASE")
+    username = os.getenv("DB_USERNAME")
+    password = os.getenv("DB_PASSWORD")
+    driver = os.getenv("DB_DRIVER", "ODBC Driver 17 for SQL Server")
+    return server, database, username, password, driver
+
+
+@st.cache_resource
+def make_engine(server, database, username, password, driver):
+    if not (server and database and username and password):
+        return None
+    conn_str = (
+        f"DRIVER={{{driver}}};SERVER={server};DATABASE={database};UID={username};PWD={password};"
+        "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
+    )
+    quoted = urllib.parse.quote_plus(conn_str)
+    engine = sqlalchemy.create_engine(f"mssql+pyodbc:///?odbc_connect={quoted}")
+    return engine
+
+
+@st.cache_data(ttl=60)
+def list_tables(_engine):
+    try:
+        sql = "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE'"
+        df = pd.read_sql(sql, _engine)
+        df["full_name"] = df["TABLE_SCHEMA"] + "." + df["TABLE_NAME"]
+        return df["full_name"].tolist()
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=30)
+def read_table(_engine, table_name, limit=500):
+    try:
+        query = f"SELECT TOP ({limit}) * FROM {table_name}"
+        return pd.read_sql(query, _engine)
+    except Exception as e:
+        st.error(f"Error reading table: {e}")
+        return pd.DataFrame()
+
+
+def infer_latlon_cols(df):
+    if df.empty:
+        return None, None
+    lat_candidates = [c for c in df.columns if c.lower() in ("latitude", "lat")]
+    lon_candidates = [c for c in df.columns if c.lower() in ("longitude", "lon", "lng", "long")]
+    lat = lat_candidates[0] if lat_candidates else None
+    lon = lon_candidates[0] if lon_candidates else None
+    return lat, lon
+
+
+def render_tableau_embed(url):
+    if not url:
+        st.info("No Tableau URL provided.")
+        return
+    # If the input looks like raw embed HTML (starts with '<'), render it directly.
+    trimmed = url.strip()
+    if trimmed.startswith("<"):
+        # The user pasted the full Tableau embed snippet (HTML + script).
+        # Render raw HTML safely inside Streamlit component.
+        components.html(trimmed, height=900, scrolling=True)
+        return
+
+    # Otherwise assume it's a direct URL and render as iframe.
+    iframe = f"<iframe src=\"{url}\" width=100% height=1400 frameborder=0></iframe>"
+    components.html(iframe, height=820)
+
+
+def nlp_to_sql_openai(prompt_text, engine, max_tokens=256, model="gpt-4o-mini"):
+    # This function expects OPENAI_API_KEY set in env. Uses OpenAI to produce a SQL SELECT only.
+    import openai
+
+    openai.api_key = os.getenv("OPENAI_API_KEY")
+    if openai.api_key is None:
+        raise RuntimeError("OPENAI_API_KEY not set in environment")
+
+    # Gather small schema info to feed into prompt
+    try:
+        tables = list_tables(engine)
+    except Exception:
+        tables = []
+
+    schema_hint = "\n".join(tables[:10]) if tables else "(schema not available)"
+
+    system_prompt = (
+        "You are a helpful assistant that translates natural language questions into SQL SELECT queries. "
+        "Only return a single syntactically valid T-SQL SELECT statement. Do NOT return any non-SELECT statements (no INSERT/UPDATE/DELETE/DROP/etc). "
+        "If the question is ambiguous, ask follow-up for clarification. Always constrain results (use TOP) to avoid very large scans. "
+        "Use the following available tables (examples):\n" + schema_hint
+    )
+
+    response = openai.ChatCompletion.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt_text},
+        ],
+        max_tokens=max_tokens,
+        temperature=0,
+    )
+
+    sql = response.choices[0].message.content.strip()
+    # Simple safety: disallow suspicious keywords
+    lowered = sql.lower()
+    forbidden = ["insert ", "update ", "delete ", "drop ", "alter ", "create ", "truncate ", "exec ", "sp_"]
+    if any(k in lowered for k in forbidden):
+        raise RuntimeError("Generated SQL contains forbidden statements")
+
+    # Ensure SELECT
+    if not lowered.startswith("select"):
+        raise RuntimeError("Generated SQL does not start with SELECT")
+
+    # Ensure TOP exists to limit result size
+    if "top" not in lowered:
+        # naive: add TOP 500
+        sql = sql.replace("select", "SELECT TOP (500)", 1)
+
+    return sql
+
+
+def run_sql(engine, sql):
+    try:
+        df = pd.read_sql(sql, engine)
+        return df
+    except Exception as e:
+        raise
+
+
+def main():
+    st.title("National Parks Intelligence System")
+
+    # Sidebar: DB + Tableau + OpenAI config
+    st.sidebar.header("Connection & Configuration")
+    server, database, username, password, driver = get_db_config()
+    st.sidebar.text("DB Server:")
+    st.sidebar.caption(server or "(not set)")
+
+    engine = make_engine(server, database, username, password, driver)
+
+    # Single hardcoded Tableau dashboard; no UI inputs for embeds
+    st.sidebar.markdown("---")
+    st.sidebar.header("Tableau Embed")
+    st.sidebar.write("This app displays a single embedded Tableau dashboard (hardcoded).")
+
+    st.sidebar.markdown("---")
+    st.sidebar.header("OpenAI")
+    if os.getenv("OPENAI_API_KEY"):
+        st.sidebar.success("OpenAI key loaded")
+    else:
+        st.sidebar.info("Set OPENAI_API_KEY in env to enable NLP-to-SQL")
+
+    page = st.sidebar.radio("Page", ["Home", "Dashboards", "Ask (NLP)"])
+
+    if page == "Home":
+        st.header("Overview")
+        st.markdown("This portal shows national park details and dashboards. Use the Dashboards page for Tableau embeds and Ask page to query the database using natural language.")
+
+        if engine is None:
+            st.warning("Database not connected. Provide credentials in environment or .env.")
+        else:
+            # Try to show a summary of a parks table if present
+            tables = list_tables(engine)
+            st.subheader("Available tables")
+            st.write(tables or "(no tables found or cannot connect)")
+
+            # If a Parks-like table exists, preview
+            candidate = next((t for t in tables if "park" in t.lower()), None)
+            if candidate:
+                st.subheader(f"Preview: {candidate}")
+                df = read_table(engine, candidate, limit=50)
+                if not df.empty:
+                    st.dataframe(df)
+                    lat, lon = infer_latlon_cols(df)
+                    if lat and lon:
+                        st.map(df.rename(columns={lat: "latitude", lon: "longitude"})[[lat, lon]].rename(columns={lat: "latitude", lon: "longitude"}))
+
+    elif page == "Dashboards":
+        st.header("Embedded Dashboard")
+        st.markdown("This page displays the single hardcoded Tableau dashboard.")
+        # Render the hardcoded Tableau embed HTML/snippet
+        try:
+            # Show the embed (the snippet includes the script that loads Tableau JS)
+            components.html(TABLEAU_EMBED_HTML, height=1000, scrolling=True)
+        except Exception as e:
+            st.error(f"Failed to render embedded dashboard: {e}")
+
+    else:
+        st.header("Ask the Database (NLP)")
+        st.markdown("Ask natural language questions and (if OpenAI key provided) the app will attempt to translate them to a safe SELECT query and return results.")
+
+        # Example prompts users can click to populate the question box
+        if "nlp_question" not in st.session_state:
+            st.session_state["nlp_question"] = "List top 10 parks by area"
+        if "run_now" not in st.session_state:
+            st.session_state["run_now"] = False
+
+        examples = [
+            ("Summary of schema", "Give me a short summary of the tables and what they contain"),
+            ("Parks table columns", "What columns does the Parks table have?"),
+            ("Top 10 by visitors", "Show the top 10 parks by annual_visitors"),
+            ("Parks in California", "List parks in California with area greater than 100000"),
+            ("Yellowstone visitors 2018-2022", "Get the visitor counts for Yellowstone between 2018 and 2022"),
+            ("Keyword search", "Find parks mentioning 'bear' in description"),
+        ]
+
+        with st.expander("Example questions (click to use)"):
+            for i, (label, prompt) in enumerate(examples):
+                col1, col2 = st.columns([5,1])
+                with col1:
+                    st.write(f"**{label}** — {prompt}")
+                with col2:
+                    if st.button("Use", key=f"ex_use_{i}"):
+                        st.session_state["nlp_question"] = prompt
+                    if st.button("Run", key=f"ex_run_{i}"):
+                        st.session_state["nlp_question"] = prompt
+                        st.session_state["run_now"] = True
+
+        question = st.text_area("Question", value=st.session_state.get("nlp_question", ""), key="nlp_question", height=120)
+        max_rows = st.number_input("Max rows to return", min_value=10, max_value=2000, value=200)
+        run = st.button("Run")
+
+        # If an example's Run button was pressed, set local run flag and clear the session marker
+        if st.session_state.get("run_now"):
+            run = True
+            st.session_state["run_now"] = False
+
+        if run:
+            if engine is None:
+                st.error("No DB connection available. Check DB credentials in environment or .env.")
+            else:
+                # If OpenAI key present, use model; otherwise fall back to a simple keyword search
+                if os.getenv("OPENAI_API_KEY"):
+                    try:
+                        sql = nlp_to_sql_openai(question, engine)
+                        st.code(sql, language="sql")
+                        df = run_sql(engine, sql)
+                        if df.shape[0] > max_rows:
+                            st.warning(f"Query returned {df.shape[0]} rows, truncating to {max_rows}")
+                            st.dataframe(df.head(max_rows))
+                        else:
+                            st.dataframe(df)
+                    except Exception as e:
+                        st.error(f"Failed to generate/execute SQL: {e}")
+                else:
+                    # naive fallback: search parks table for keywords
+                    tables = list_tables(engine)
+                    candidate = next((t for t in tables if "park" in t.lower()), None)
+                    if not candidate:
+                        st.error("No parks table found and OpenAI key not set.")
+                    else:
+                        # build a simple LIKE-based query across textual columns
+                        df_sample = read_table(engine, candidate, limit=10)
+                        text_cols = [c for c in df_sample.columns if df_sample[c].dtype == object]
+                        if not text_cols:
+                            st.error("No text columns available for fallback search")
+                        else:
+                            # Escape single quotes for T-SQL and build WHERE clause
+                            escaped = question.replace("'", "''")
+                            where = " OR ".join([f"[{c}] LIKE '%{escaped}%'" for c in text_cols])
+                            sql = f"SELECT TOP ({max_rows}) * FROM {candidate} WHERE {where}"
+                            st.code(sql, language="sql")
+                            df = run_sql(engine, sql)
+                            st.dataframe(df)
+
+
+if __name__ == "__main__":
+    main()
