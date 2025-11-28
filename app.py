@@ -17,11 +17,22 @@ TABLEAU_EMBED_HTML = """
 
 
 def get_db_config():
-    server = os.getenv("DB_SERVER")
-    database = os.getenv("DB_DATABASE")
-    username = os.getenv("DB_USERNAME")
-    password = os.getenv("DB_PASSWORD")
-    driver = os.getenv("DB_DRIVER", "ODBC Driver 17 for SQL Server")
+    # Prefer environment variables (or .env via load_dotenv()),
+    # but fall back to Streamlit secrets when available (deployed on Streamlit Cloud).
+    def _get(key, default=None):
+        v = os.getenv(key)
+        if v:
+            return v
+        try:
+            return st.secrets.get(key, default)
+        except Exception:
+            return default
+
+    server = _get("DB_SERVER")
+    database = _get("DB_DATABASE")
+    username = _get("DB_USERNAME")
+    password = _get("DB_PASSWORD")
+    driver = _get("DB_DRIVER", "ODBC Driver 17 for SQL Server")
     return server, database, username, password, driver
 
 
