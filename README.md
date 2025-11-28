@@ -52,9 +52,9 @@ Note: you can also set env vars in your PowerShell session instead of a file:
 $env:DB_SERVER = "national-parks.database.windows.net"
 $env:DB_DATABASE = "national-parks"
 $env:DB_USERNAME = "national-parks"
-$env:DB_PASSWORD = "InsightCrew#123"
-$env:DB_DRIVER = "ODBC Driver 17 for SQL Server"
-$env:OPENAI_API_KEY = "sk-..."
+$env:DB_PASSWORD = "*****"
+$env:DB_DRIVER = "ODBC Driver 18 for SQL Server"
+$env:OPENAI_API_KEY = "****"
 ```
 
 5. Run the Streamlit app (from the project root):
@@ -140,14 +140,6 @@ OpenAI and Tableau
 - You can configure three Tableau Public embed URLs in the app sidebar or set `TABLEAU_URL_1`, `TABLEAU_URL_2`, `TABLEAU_URL_3` in the environment.
 
 Example environment variables (PowerShell):
-
-```powershell
-$env:DB_SERVER="national-parks.database.windows.net"
-$env:DB_DATABASE="national-parks"
-$env:DB_USERNAME="national-parks"
-$env:DB_PASSWORD="InsightCrew#123"
-$env:OPENAI_API_KEY="sk-..."
-```
 
 
 Next steps
