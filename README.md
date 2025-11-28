@@ -42,10 +42,9 @@ Example `.env` values (replace placeholders):
 DB_SERVER=national-parks.database.windows.net
 DB_DATABASE=national-parks
 DB_USERNAME=national-parks
-DB_PASSWORD=InsightCrew#123
-DB_DRIVER=ODBC Driver 17 for SQL Server
-OPENAI_API_KEY=sk-...
-```
+DB_PASSWORD=*****
+DB_DRIVER=ODBC Driver 18 for SQL Server
+OPENAI_API_KEY=*****
 
 Note: you can also set env vars in your PowerShell session instead of a file:
 
