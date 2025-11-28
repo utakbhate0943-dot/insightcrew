@@ -49,6 +49,22 @@ def make_engine(server, database, username, password, driver):
     return engine
 
 
+def test_db_connection(engine):
+    """Attempt a minimal DB connection and return (ok, error_message).
+    This does not log credentials; any returned error may help diagnose network/driver issues.
+    """
+    if engine is None:
+        return False, "No engine (missing credentials)"
+    try:
+        with engine.connect() as conn:
+            # lightweight check
+            conn.execute(sqlalchemy.text("SELECT 1"))
+        return True, None
+    except Exception as e:
+        # return stringified error for diagnostics (do not include full connection string)
+        return False, str(e)
+
+
 @st.cache_data(ttl=60)
 def list_tables(_engine):
     try:
@@ -229,6 +245,39 @@ def main():
     st.sidebar.caption(server or "(not set)")
 
     engine = make_engine(server, database, username, password, driver)
+
+    # Diagnostic: show where credentials are coming from (env / secrets / missing)
+    def _source_of(key):
+        if os.getenv(key):
+            return "env"
+        try:
+            if key in st.secrets and st.secrets.get(key) is not None:
+                return "secrets"
+        except Exception:
+            pass
+        return "(missing)"
+
+    cred_sources = {
+        "server": _source_of("DB_SERVER"),
+        "database": _source_of("DB_DATABASE"),
+        "username": _source_of("DB_USERNAME"),
+        "password": _source_of("DB_PASSWORD"),
+    }
+
+    # Masked display for diagnostics (do not show password)
+    st.sidebar.markdown("**DB credential sources**")
+    st.sidebar.write(f"Server: {cred_sources['server']}")
+    st.sidebar.write(f"Database: {cred_sources['database']}")
+    st.sidebar.write(f"Username: {cred_sources['username']}")
+    st.sidebar.write(f"Password: {cred_sources['password']} (hidden)")
+
+    # Test connection and show any error for debugging
+    ok, err = test_db_connection(engine)
+    if not ok and err:
+        st.sidebar.error("DB connection test failed — see message below")
+        st.sidebar.code(err)
+    elif ok:
+        st.sidebar.success("DB connection test: OK")
 
     # Single hardcoded Tableau dashboard; no UI inputs for embeds
     st.sidebar.markdown("---")
