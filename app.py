@@ -50,13 +50,42 @@ def list_tables(_engine):
 
 
 @st.cache_data(ttl=30)
-def read_table(_engine, table_name, limit=500):
+def read_table(_engine, table_name, limit=500, where=None):
     try:
-        query = f"SELECT TOP ({limit}) * FROM {table_name}"
+        where_clause = f" WHERE {where}" if where and where.strip() else ""
+        query = f"SELECT TOP ({limit}) * FROM {table_name}{where_clause}"
         return pd.read_sql(query, _engine)
     except Exception as e:
-        st.error(f"Error reading table: {e}")
+        # Do not crash the app; return empty df and surface the error where called
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def get_table_schema(_engine, table_name):
+    try:
+        if '.' in table_name:
+            schema, tbl = table_name.split('.', 1)
+        else:
+            schema, tbl = 'dbo', table_name
+        sql = (
+            "SELECT COLUMN_NAME, DATA_TYPE"
+            " FROM INFORMATION_SCHEMA.COLUMNS"
+            " WHERE TABLE_SCHEMA = '" + schema + "' AND TABLE_NAME = '" + tbl + "'"
+            " ORDER BY ORDINAL_POSITION"
+        )
+        return pd.read_sql(sql, _engine)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def get_table_row_count(_engine, table_name):
+    try:
+        sql = f"SELECT COUNT(*) as cnt FROM {table_name}"
+        df = pd.read_sql(sql, _engine)
+        return int(df.iloc[0, 0])
+    except Exception:
+        return None
 
 
 def infer_latlon_cols(df):
@@ -88,19 +117,9 @@ def render_tableau_embed(url):
 
 def nlp_to_sql_openai(prompt_text, engine, max_tokens=256, model="gpt-4o-mini"):
     # This function expects OPENAI_API_KEY set in env. Uses OpenAI to produce a SQL SELECT only.
-    import openai
-
-    openai.api_key = os.getenv("OPENAI_API_KEY")
-    if openai.api_key is None:
-        raise RuntimeError("OPENAI_API_KEY not set in environment")
-
-    # Gather small schema info to feed into prompt
-    try:
-        tables = list_tables(engine)
-    except Exception:
-        tables = []
-
-    schema_hint = "\n".join(tables[:10]) if tables else "(schema not available)"
+    # Prefer the new OpenAI client if available (openai>=1.0.0). Fall back to the older
+    # openai.ChatCompletion interface for compatibility with older installs.
+    schema_hint = "\n".join(list_tables(engine)[:10]) if engine is not None else "(schema not available)"
 
     system_prompt = (
         "You are a helpful assistant that translates natural language questions into SQL SELECT queries. "
@@ -109,17 +128,60 @@ def nlp_to_sql_openai(prompt_text, engine, max_tokens=256, model="gpt-4o-mini"):
         "Use the following available tables (examples):\n" + schema_hint
     )
 
-    response = openai.ChatCompletion.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt_text},
-        ],
-        max_tokens=max_tokens,
-        temperature=0,
-    )
+    sql = None
+    # Try new client API first
+    try:
+        from openai import OpenAI
+        client = OpenAI()
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt_text},
+            ],
+            max_tokens=max_tokens,
+            temperature=0,
+        )
+        # response structure may vary; try common access patterns
+        try:
+            sql = resp.choices[0].message.content.strip()
+        except Exception:
+            try:
+                sql = resp.choices[0]["message"]["content"].strip()
+            except Exception:
+                sql = getattr(resp.choices[0], 'text', None)
+                if sql:
+                    sql = sql.strip()
+    except Exception:
+        # Fall back to older openai package interface
+        try:
+            import openai
+            openai.api_key = os.getenv("OPENAI_API_KEY")
+            if openai.api_key is None:
+                raise RuntimeError("OPENAI_API_KEY not set in environment")
+            resp = openai.ChatCompletion.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt_text},
+                ],
+                max_tokens=max_tokens,
+                temperature=0,
+            )
+            try:
+                sql = resp.choices[0].message.content.strip()
+            except Exception:
+                sql = getattr(resp.choices[0], 'text', None)
+                if sql:
+                    sql = sql.strip()
+        except Exception as e:
+            raise RuntimeError(
+                "OpenAI request failed. Either set OPENAI_API_KEY or install a compatible openai package (e.g. openai>=1.0.0), or pin to openai==0.28 if you prefer the old API. "
+                f"Inner error: {e}"
+            )
 
-    sql = response.choices[0].message.content.strip()
+    if not sql:
+        raise RuntimeError("No SQL returned from OpenAI model")
     # Simple safety: disallow suspicious keywords
     lowered = sql.lower()
     forbidden = ["insert ", "update ", "delete ", "drop ", "alter ", "create ", "truncate ", "exec ", "sp_"]
@@ -181,18 +243,54 @@ def main():
             # Try to show a summary of a parks table if present
             tables = list_tables(engine)
             st.subheader("Available tables")
-            st.write(tables or "(no tables found or cannot connect)")
+            if not tables:
+                st.write("(no tables found or cannot connect)")
+            else:
+                # let the user pick a table to preview
+                selected = st.selectbox("Choose a table to preview", options=tables)
+                if selected:
+                    st.subheader(f"Preview: {selected}")
 
-            # If a Parks-like table exists, preview
-            candidate = next((t for t in tables if "park" in t.lower()), None)
-            if candidate:
-                st.subheader(f"Preview: {candidate}")
-                df = read_table(engine, candidate, limit=50)
-                if not df.empty:
-                    st.dataframe(df)
-                    lat, lon = infer_latlon_cols(df)
-                    if lat and lon:
-                        st.map(df.rename(columns={lat: "latitude", lon: "longitude"})[[lat, lon]].rename(columns={lat: "latitude", lon: "longitude"}))
+                    # Show schema and row count
+                    schema_df = get_table_schema(engine, selected)
+                    row_count = get_table_row_count(engine, selected)
+                    col1, col2 = st.columns([3,1])
+                    with col1:
+                        if not schema_df.empty:
+                            st.markdown("**Columns (name : type)**")
+                            st.write(schema_df.set_index('COLUMN_NAME')['DATA_TYPE'].to_dict())
+                        else:
+                            st.info("Could not retrieve column schema")
+                    with col2:
+                        st.markdown("**Row count**")
+                        st.write(row_count if row_count is not None else "unknown")
+
+                    # Preview options (no raw WHERE clause for safety)
+                    st.markdown("---")
+                    st.markdown("**Preview options**")
+                    max_rows = st.number_input("Limit rows", min_value=10, max_value=5000, value=50, step=10)
+
+                    # Load preview (cached)
+                    df = read_table(engine, selected, limit=int(max_rows), where=None)
+                    if df is None or df.empty:
+                        st.info("No rows available for this table or failed to read.")
+                    else:
+                        st.dataframe(df)
+                        lat, lon = infer_latlon_cols(df)
+                        if lat and lon:
+                            # normalize and coerce to numeric to avoid map errors
+                            map_df = df.rename(columns={lat: "latitude", lon: "longitude"})[["latitude", "longitude"]].copy()
+                            map_df["latitude"] = pd.to_numeric(map_df["latitude"], errors='coerce')
+                            map_df["longitude"] = pd.to_numeric(map_df["longitude"], errors='coerce')
+                            map_df = map_df.dropna()
+                            if not map_df.empty:
+                                st.map(map_df)
+                            else:
+                                st.info("No valid numeric latitude/longitude values to map for this preview.")
+
+                        # Download as CSV
+                        csv = df.to_csv(index=False).encode('utf-8')
+                        st.download_button("Download preview as CSV", data=csv, file_name=f"{selected.replace('.','_')}_preview.csv", mime='text/csv')
 
     elif page == "Dashboards":
         st.header("Embedded Dashboard")
