@@ -40,13 +40,41 @@ def get_db_config():
 def make_engine(server, database, username, password, driver):
     if not (server and database and username and password):
         return None
+    # First try using pyodbc (requires system ODBC driver e.g. msodbcsql17/18)
     conn_str = (
         f"DRIVER={{{driver}}};SERVER={server};DATABASE={database};UID={username};PWD={password};"
         "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
     )
     quoted = urllib.parse.quote_plus(conn_str)
-    engine = sqlalchemy.create_engine(f"mssql+pyodbc:///?odbc_connect={quoted}")
-    return engine
+    try:
+        engine = sqlalchemy.create_engine(f"mssql+pyodbc:///?odbc_connect={quoted}")
+        return engine
+    except Exception as e:
+        # Common failure: ODBC driver not installed on the host ("Can't open lib ... file not found").
+        msg = str(e)
+        # If the error looks like a missing driver, try a pure-Python fallback (pymssql / FreeTDS)
+        if "Can't open lib" in msg or "Driver" in msg or "data source name" in msg.lower():
+            try:
+                # Import here so requirement is optional for local dev until installed
+                import pymssql  # type: ignore
+                # Build a pymssql connection URL. Use default port 1433 if none specified.
+                host = server
+                port = 1433
+                if "," in server:
+                    # server may be in the form 'host,port'
+                    parts = server.split(",", 1)
+                    host = parts[0]
+                    try:
+                        port = int(parts[1])
+                    except Exception:
+                        port = 1433
+                engine = sqlalchemy.create_engine(f"mssql+pymssql://{username}:{urllib.parse.quote_plus(password)}@{host}:{port}/{database}")
+                return engine
+            except Exception:
+                # re-raise original error to preserve context (but avoid exposing credentials)
+                raise RuntimeError("pyodbc failed and pymssql fallback also failed; see inner exceptions for details") from e
+        # If it's another kind of error, raise it
+        raise
 
 
 def test_db_connection(engine):
