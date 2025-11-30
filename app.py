@@ -4,6 +4,9 @@ import pandas as pd
 import sqlalchemy
 import streamlit as st
 import streamlit.components.v1 as components
+import base64
+from pathlib import Path
+import io
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -142,7 +145,7 @@ def get_table_row_count(_engine, table_name):
     try:
         sql = f"SELECT COUNT(*) as cnt FROM {table_name}"
         df = pd.read_sql(sql, _engine)
-        return int(df.iloc[0, 0])
+        return int(df.iloc[0, 0]) if not df.empty else 0
     except Exception:
         return None
 
@@ -170,8 +173,8 @@ def render_tableau_embed(url):
         return
 
     # Otherwise assume it's a direct URL and render as iframe.
-    iframe = f"<iframe src=\"{url}\" width=100% height=1400 frameborder=0></iframe>"
-    components.html(iframe, height=820)
+    iframe = f"<iframe src=\"{url}\" width=100% height=1800 frameborder=0></iframe>"
+    components.html(iframe, height=1500)
 
 
 def nlp_to_sql_openai(prompt_text, engine, max_tokens=256, model="gpt-4o-mini"):
@@ -268,7 +271,120 @@ def run_sql(engine, sql):
 
 
 def main():
-    st.title("National Parks Intelligence System")
+    # --- Themed header (map image on the right) and app color palette ---
+    # No uploader UI: we will look for an image file in ./assets/ and use the first match.
+    assets_dir = Path("assets")
+    assets_dir.mkdir(exist_ok=True)
+
+    # prefer the user's file name from attachments if present, otherwise take the first image found
+    preferred_names = [
+        "usa-map-with-national-parks.png",
+        "header.png",
+        "header.jpg",
+        "header.jpeg",
+    ]
+    header_path = None
+    for name in preferred_names:
+        candidate = assets_dir / name
+        if candidate.exists():
+            header_path = candidate
+            break
+    if header_path is None:
+        # pick first image in assets dir
+        for ext in ("*.png", "*.jpg", "*.jpeg"):
+            found = list(assets_dir.glob(ext))
+            if found:
+                header_path = found[0]
+                break
+
+    def _render_header(title_text: str, image_path: Path | None, height: int = 260):
+        # Render a header with the provided image as a full-width background and a title positioned on the right.
+        if image_path is not None and image_path.exists():
+            try:
+                data = image_path.read_bytes()
+                mime = "jpeg"
+                if str(image_path).lower().endswith(".png"):
+                    mime = "png"
+                b64 = base64.b64encode(data).decode()
+                # Use background-size:auto 100% so the image height matches the container height
+                html = f"""
+<div style="position:relative;width:100%;height:{height}px;overflow:hidden;border-radius:6px;margin-bottom:18px;">
+    <div style="position:absolute;inset:0;background-image:url('data:image/{mime};base64,{b64}');background-size:auto 100%;background-repeat:no-repeat;background-position:right center;filter:brightness(0.55) contrast(1.05);"></div>
+    <div style="position:absolute;inset:0;background:linear-gradient(90deg, rgba(6,40,21,0.04) 0%, rgba(255,245,230,0.06) 100%);mix-blend-mode:multiply;"></div>
+    <div style="position:absolute;left:36px;top:50%;transform:translateY(-50%);text-align:left;padding:0 24px;">
+        <h1 style="margin:0;color:#fff;font-size:40px;font-weight:800;text-shadow:0 6px 20px rgba(0,0,0,0.6);font-family:Helvetica,Arial,sans-serif;">{title_text}</h1>
+    </div>
+</div>
+"""
+                components.html(html, height=height + 8, scrolling=False)
+                return
+            except Exception:
+                pass
+
+        # fallback plain title
+        st.markdown(f"<h1 style='color:#0b4d2e'>{title_text}</h1>", unsafe_allow_html=True)
+
+    # Apply a National Parks–style color palette via lightweight CSS
+
+    st.markdown(
+            """
+    <style>
+    /* National Parks palette: soft parchment background, deep greens and warm fall accents */
+    [data-testid="stAppViewContainer"] { background: #f6f4ec; color: #17221a; }
+    [data-testid="stAppViewContainer"] h1, [data-testid="stAppViewContainer"] h2, [data-testid="stAppViewContainer"] h3, [data-testid="stAppViewContainer"] h4, [data-testid="stAppViewContainer"] p, [data-testid="stAppViewContainer"] span {
+      color: #17221a !important;
+    }
+
+    /* Sidebar with richer greens */
+    [data-testid="stSidebar"] { background: linear-gradient(180deg,#0f5d2f,#2a6b38); color: #f5fbf5; }
+    [data-testid="stSidebar"] * { color: #f5fbf5 !important; }
+
+    /* Make sidebar headers/titles more visible */
+    [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] .css-1lsmgbg {
+        color: #ffffff !important;
+        font-size: 20px !important;
+        font-weight: 800 !important;
+        letter-spacing: 0.2px;
+        text-shadow: 0 2px 6px rgba(0,0,0,0.45);
+    }
+
+    /* Make sidebar labels slightly larger and bolder for clarity */
+    [data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] label {
+        color: #eef7ee !important;
+        font-weight: 600 !important;
+    }
+
+    /* Accent colors */
+    :root {
+      --np-forest: #164b2e;
+      --np-moss: #4b7a54;
+      --np-fall: #b75a1e;
+      --np-sand: #f2e7d6;
+    }
+
+    /* Buttons */
+    .stButton>button { background: linear-gradient(180deg,var(--np-moss),var(--np-forest)); color: #fff; border-radius:8px; }
+
+    /* DataFrame / table contrast */
+    table { color: #17221a !important; }
+    th { background: #efe8de !important; color: #17221a !important; }
+    td { color: #17221a !important; }
+
+    /* Expander header readability */
+    .streamlit-expanderHeader, .stExpanderHeader, .css-1v3fvcr { color: #17221a !important; }
+
+    /* Links and captions */
+    a, .stCaption { color: var(--np-forest) !important; }
+
+    /* Make code blocks and SQL snippets more readable */
+    .stCodeBlock, code { background:#f3efe6; color:#17221a; }
+
+    </style>
+    """,
+            unsafe_allow_html=True,
+        )
+
+    _render_header("National Parks Intelligence System", header_path)
 
     # Sidebar: DB + Tableau + OpenAI config
     st.sidebar.header("Connection & Configuration")
@@ -311,17 +427,7 @@ def main():
     elif ok:
         st.sidebar.success("DB connection test: OK")
 
-    # Single hardcoded Tableau dashboard; no UI inputs for embeds
-    st.sidebar.markdown("---")
-    st.sidebar.header("Tableau Embed")
-    st.sidebar.write("This app displays a single embedded Tableau dashboard (hardcoded).")
-
-    st.sidebar.markdown("---")
-    st.sidebar.header("OpenAI")
-    if os.getenv("OPENAI_API_KEY"):
-        st.sidebar.success("OpenAI key loaded")
-    else:
-        st.sidebar.info("Set OPENAI_API_KEY in env to enable NLP-to-SQL")
+    # Sidebar: (removed Tableau Embed and OpenAI quick-status per user request)
 
     page = st.sidebar.radio("Page", ["Home", "Dashboards", "Ask (NLP)"])
 
@@ -395,82 +501,265 @@ def main():
             st.error(f"Failed to render embedded dashboard: {e}")
 
     else:
-        st.header("Ask the Database (NLP)")
-        st.markdown("Ask natural language questions and (if OpenAI key provided) the app will attempt to translate them to a safe SELECT query and return results.")
+        st.header("Ask — Analytical Questions")
+        st.markdown(
+            "This page lists 8 analytical questions with SQL snippet hints. "
+            "Click an item to view the SQL and press `Run SQL` to execute it against the connected database. "
+            "(This replaces the previous chatbot-style NLP UI.)"
+        )
 
-        # Example prompts users can click to populate the question box
-        if "nlp_question" not in st.session_state:
-            st.session_state["nlp_question"] = "List top 10 parks by area"
-        if "run_now" not in st.session_state:
-            st.session_state["run_now"] = False
+        max_rows = st.number_input("Max rows to display", min_value=10, max_value=2000, value=200)
 
-        examples = [
-            ("Summary of schema", "Give me a short summary of the tables and what they contain"),
-            ("Parks table columns", "What columns does the Parks table have?"),
-            ("Top 10 by visitors", "Show the top 10 parks by annual_visitors"),
-            ("Parks in California", "List parks in California with area greater than 100000"),
-            ("Yellowstone visitors 2018-2022", "Get the visitor counts for Yellowstone between 2018 and 2022"),
-            ("Keyword search", "Find parks mentioning 'bear' in description"),
+        if engine is None:
+            st.warning("Database not connected. Provide credentials in environment or .env.")
+
+        # Analytical questions and SQL snippet hints provided by user
+        questions = [
+            {
+                "id": "q1",
+                "title": "Year-over-Year Total Visits Growth (Line Chart) (vw_YearOverYearVisits)",
+                "sql": """
+SELECT 
+    year,
+    SUM(recreational_visits) + SUM(non_recreational_visits)  as total_visits,
+    (SUM(recreational_visits) + SUM(non_recreational_visits)) - LAG(SUM(recreational_visits) + SUM(non_recreational_visits)) OVER (ORDER BY year) as visit_change
+FROM stats
+GROUP BY year
+ORDER BY year;
+""",
+            },
+            {
+                "id": "q2",
+                "title": "Right Season to visit the park (vw_BestSeasonToVisit)",
+                "sql": """
+SELECT 
+    p.park_code,
+    p.name as park_name,
+    s.type_of_season as season,
+    s.[Good] as good_months,
+    s.[Limited] as limited_months,
+    s.[closed] as closed_months
+FROM park p
+JOIN seasons s ON p.park_code = s.park_code
+WHERE s.[Good] IS NOT NULL;
+""",
+            },
+            {
+                "id": "q3",
+                "title": "Parks by State Count (Map) (vw_ParksByStateCount)",
+                "sql": """
+SELECT 
+    state,
+    COUNT(*) as number_of_parks
+FROM park
+GROUP BY state
+ORDER BY number_of_parks DESC;
+""",
+            },
+            {
+                "id": "q4",
+                "title": "Revenue Per Visitor by Fee Structure (vw_RevenuePerVisitor)",
+                "sql": """
+WITH ParkRevenue AS (
+    SELECT 
+        fp.park_code,
+        p.name as park_name,
+        fp.is_entry_free,
+        fp.is_parking_free,
+        AVG(fp.entry_fee) as avg_entry_fee,
+        AVG(fp.pass_cost) as avg_pass_cost,
+        CASE 
+            WHEN fp.is_entry_free = 1 THEN 'Free Entry'
+            ELSE 'Paid Entry'
+        END as fee_structure
+    FROM feespasses fp
+    JOIN park p ON fp.park_code = p.park_code
+    GROUP BY fp.park_code, p.name, fp.is_entry_free, fp.is_parking_free
+),
+VisitorStats AS (
+    SELECT 
+        park_code,
+        ROUND(AVG(recreational_visits) + AVG(non_recreational_visits), 2) as avg_annual_visits
+    FROM stats
+    GROUP BY park_code
+)
+SELECT 
+    pr.park_code,
+    pr.park_name,
+    pr.fee_structure,
+    pr.is_parking_free,
+    ROUND(pr.avg_entry_fee, 2) as avg_entry_fee,
+    pr.avg_pass_cost,
+    vs.avg_annual_visits,
+    CASE 
+        WHEN vs.avg_annual_visits > 0 
+        THEN ROUND((COALESCE(pr.avg_entry_fee, 0) * vs.avg_annual_visits) / vs.avg_annual_visits, 2)
+        ELSE 0 
+    END as estimated_revenue_per_visitor,
+    ROUND(pr.avg_pass_cost / NULLIF(pr.avg_entry_fee, 0), 2) as pass_to_entry_ratio
+FROM ParkRevenue pr
+LEFT JOIN VisitorStats vs ON pr.park_code = vs.park_code
+ORDER BY fee_structure, estimated_revenue_per_visitor DESC;
+""",
+            },
+            {
+                "id": "q5",
+                "title": "Campground Cost-to-Capacity & Occupancy (vw_CampgroundCostCapacityAnalysis)",
+                "sql": """
+SELECT 
+    p.name as park_name,
+    p.state,
+    COUNT(DISTINCT c.campgrounds_id) as num_campgrounds,
+    ROUND(AVG(c.cost), 2) as avg_cost,
+    ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights), 0) as avg_camping_nights,
+    ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights) / 
+          NULLIF(COUNT(DISTINCT c.campgrounds_id), 0), 0) as nights_per_campground,
+    ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights) / 
+          NULLIF(AVG(c.cost), 0), 0) as efficiency_score
+FROM park p
+JOIN campgrounds c ON p.park_code = c.park_code
+JOIN stats s ON p.park_code = s.park_code
+    AND c.cost IS NOT NULL
+    AND c.cost > 0
+GROUP BY p.name, p.state
+HAVING COUNT(DISTINCT c.campgrounds_id) > 0
+ORDER BY efficiency_score DESC;
+""",
+            },
+            {
+                "id": "q6",
+                "title": "Rising Stars (vw_RisingStarParks)",
+                "sql": """
+WITH RecentRise AS (
+    SELECT 
+        p.park_code,
+        p.name as park_name,
+        p.state,
+        s.year,
+        s.recreational_visits + s.non_recreational_visits as visits,
+        LAG(s.recreational_visits + s.non_recreational_visits) OVER (PARTITION BY p.park_code ORDER BY s.year) as prev_year
+    FROM park p
+    JOIN stats s ON p.park_code = s.park_code
+    WHERE s.year >= (SELECT MAX(year) - 1 FROM stats)
+)
+SELECT TOP 10
+    park_name,
+    state,
+    year,
+    visits as current_visits,
+    prev_year as previous_visits,
+    visits - prev_year as visit_change,
+    ROUND(((visits - prev_year) * 100.0) / NULLIF(prev_year, 0), 2) as rise_percent
+FROM RecentRise
+WHERE prev_year IS NOT NULL
+    AND visits > prev_year
+    AND year = (SELECT MAX(year) FROM stats)
+ORDER BY rise_percent DESC;
+""",
+            },
+            {
+                "id": "q7",
+                "title": "State-Level Park Statistics (vw_StateLevelParkStats)",
+                "sql": """
+SELECT 
+    p.state,
+    COUNT(DISTINCT p.park_code) as number_of_parks,
+    ROUND(SUM(s.recreational_visits), 2) as total_state_visits,
+    ROUND(AVG(s.recreational_visits), 2) as avg_visits_per_park,
+    ROUND(SUM(s.recreational_hours), 2) as total_recreational_hours,
+    ROUND(AVG(s.recreational_hours), 2) as avg_hours_per_park,
+    ROUND(SUM(s.recreational_hours) * 1.0 / NULLIF(SUM(s.recreational_visits), 0), 2) as avg_hours_per_visit_state,
+    SUM(s.tent_overnights + s.rv_overnights + s.backcountry_overnights) as total_camping_nights
+FROM park p
+JOIN stats s ON p.park_code = s.park_code
+GROUP BY p.state
+""",
+            },
+            {
+                "id": "q8",
+                "title": "Falling Stars - Parks Needing Attention (vw_ParksNeedingAttention)",
+                "sql": """
+WITH RecentDecline AS (
+    SELECT 
+        p.park_code,
+        p.name as park_name,
+        p.state,
+        s.year,
+        s.recreational_visits,
+        LAG(s.recreational_visits) OVER (PARTITION BY p.park_code ORDER BY s.year) as prev_year
+    FROM park p
+    JOIN stats s ON p.park_code = s.park_code
+    WHERE s.year >= (SELECT MAX(year) - 2 FROM stats)
+)
+SELECT TOP 10
+    park_name,
+    state,
+    year,
+    recreational_visits as current_visits,
+    prev_year as previous_visits,
+    ABS(recreational_visits - prev_year) as visit_change,
+    ROUND(((recreational_visits - prev_year) * 100.0) / NULLIF(prev_year, 0), 2) as decline_percent
+FROM RecentDecline
+WHERE prev_year IS NOT NULL
+    AND recreational_visits < prev_year
+    AND year = (SELECT MAX(year) FROM stats)
+ORDER BY decline_percent ASC;
+""",
+            },
         ]
 
-        with st.expander("Example questions (click to use)"):
-            for i, (label, prompt) in enumerate(examples):
-                col1, col2 = st.columns([5,1])
-                with col1:
-                    st.write(f"**{label}** — {prompt}")
-                with col2:
-                    if st.button("Use", key=f"ex_use_{i}"):
-                        st.session_state["nlp_question"] = prompt
-                    if st.button("Run", key=f"ex_run_{i}"):
-                        st.session_state["nlp_question"] = prompt
-                        st.session_state["run_now"] = True
+        # Index hint (display only)
+        index_snippet = (
+            "CREATE NONCLUSTERED INDEX IX_stats_ParkCode_Year\n"
+            "ON dbo.stats (park_code, year)\n"
+            "INCLUDE (\n"
+            "    recreational_visits,\n"
+            "    non_recreational_visits,\n"
+            "    recreational_hours,\n"
+            "    tent_overnights,\n"
+            "    rv_overnights,\n"
+            "    backcountry_overnights,\n"
+            "    concessioner_camping\n"
+            ");"
+        )
 
-        question = st.text_area("Question", value=st.session_state.get("nlp_question", ""), key="nlp_question", height=120)
-        max_rows = st.number_input("Max rows to return", min_value=10, max_value=2000, value=200)
-        run = st.button("Run")
+        for i, q in enumerate(questions):
+            with st.expander(f"{i+1}. {q['title']}"):
+                # Provide an editable SQL area pre-populated with the snippet
+                sql_key = f"sql_{q['id']}"
+                sql_text = st.text_area("SQL (editable)", value=q["sql"], key=sql_key, height=220)
 
-        # If an example's Run button was pressed, set local run flag and clear the session marker
-        if st.session_state.get("run_now"):
-            run = True
-            st.session_state["run_now"] = False
-
-        if run:
-            if engine is None:
-                st.error("No DB connection available. Check DB credentials in environment or .env.")
-            else:
-                # If OpenAI key present, use model; otherwise fall back to a simple keyword search
-                if os.getenv("OPENAI_API_KEY"):
-                    try:
-                        sql = nlp_to_sql_openai(question, engine)
-                        st.code(sql, language="sql")
-                        df = run_sql(engine, sql)
-                        if df.shape[0] > max_rows:
-                            st.warning(f"Query returned {df.shape[0]} rows, truncating to {max_rows}")
-                            st.dataframe(df.head(max_rows))
+                # Offer a small reset button to restore the original snippet
+                reset_col, run_col = st.columns([1, 1])
+                with reset_col:
+                    if st.button("Reset to snippet", key=f"reset_{q['id']}"):
+                        st.session_state[sql_key] = q["sql"]
+                        sql_text = q["sql"]
+                with run_col:
+                    if st.button("Run SQL", key=f"run_{q['id']}"):
+                        if engine is None:
+                            st.error("No DB connection available. Check DB credentials.")
                         else:
-                            st.dataframe(df)
-                    except Exception as e:
-                        st.error(f"Failed to generate/execute SQL: {e}")
-                else:
-                    # naive fallback: search parks table for keywords
-                    tables = list_tables(engine)
-                    candidate = next((t for t in tables if "park" in t.lower()), None)
-                    if not candidate:
-                        st.error("No parks table found and OpenAI key not set.")
-                    else:
-                        # build a simple LIKE-based query across textual columns
-                        df_sample = read_table(engine, candidate, limit=10)
-                        text_cols = [c for c in df_sample.columns if df_sample[c].dtype == object]
-                        if not text_cols:
-                            st.error("No text columns available for fallback search")
-                        else:
-                            # Escape single quotes for T-SQL and build WHERE clause
-                            escaped = question.replace("'", "''")
-                            where = " OR ".join([f"[{c}] LIKE '%{escaped}%'" for c in text_cols])
-                            sql = f"SELECT TOP ({max_rows}) * FROM {candidate} WHERE {where}"
-                            st.code(sql, language="sql")
-                            df = run_sql(engine, sql)
-                            st.dataframe(df)
+                            try:
+                                # Use the editable SQL text when executing
+                                df = run_sql(engine, sql_text)
+                                st.caption("Executed SQL:")
+                                st.code(sql_text, language="sql")
+                                if df is None or df.empty:
+                                    st.info("Query returned no rows.")
+                                else:
+                                    if df.shape[0] > int(max_rows):
+                                        st.warning(f"Query returned {df.shape[0]} rows; showing first {max_rows}.")
+                                        st.dataframe(df.head(int(max_rows)))
+                                    else:
+                                        st.dataframe(df)
+                            except Exception as e:
+                                st.error(f"Failed to execute query: {e}")
+
+                st.write("Use the SQL snippet above as a hint. Edit the SQL as needed before running on your database.")
+
+        with st.expander("Index hint (display only)"):
+            st.code(index_snippet, language="sql")
 
 
 if __name__ == "__main__":
