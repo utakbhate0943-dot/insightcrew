@@ -57,31 +57,68 @@ def make_engine(server, database, username, password, driver):
             conn.execute(sqlalchemy.text("SELECT 1"))
         return engine
     except Exception as e:
-        msg = str(e).lower()
-        # If the failure looks like a missing ODBC driver, try a pure-Python pymssql fallback
-        if ("can't open lib" in msg) or ("driver manager" in msg) or ("odbc driver" in msg):
+        # Save last error for UI diagnostics
+        last_err = str(e)
+        try:
+            st.session_state['db_connect_error'] = last_err
+        except Exception:
+            pass
+
+        # Try a safer pyodbc connection that trusts the server certificate (common TLS issues)
+        try:
+            alt_conn_str = (
+                f"DRIVER={{{driver}}};SERVER={server};DATABASE={database};UID={username};PWD={password};"
+                "Encrypt=yes;TrustServerCertificate=yes;Connection Timeout=30;"
+            )
+            alt_quoted = urllib.parse.quote_plus(alt_conn_str)
+            engine_alt = sqlalchemy.create_engine(f"mssql+pyodbc:///?odbc_connect={alt_quoted}")
+            with engine_alt.connect() as conn_alt:
+                conn_alt.execute(sqlalchemy.text("SELECT 1"))
+            return engine_alt
+        except Exception:
+            # try a less strict encryption setting as a fallback
             try:
-                import pymssql  # type: ignore
-                host = server
-                port = 1433
-                if "," in server:
-                    parts = server.split(",", 1)
-                    host = parts[0]
-                    try:
-                        port = int(parts[1])
-                    except Exception:
-                        port = 1433
-                engine2 = sqlalchemy.create_engine(
-                    f"mssql+pymssql://{username}:{urllib.parse.quote_plus(password)}@{host}:{port}/{database}"
+                alt_conn_str2 = (
+                    f"DRIVER={{{driver}}};SERVER={server};DATABASE={database};UID={username};PWD={password};"
+                    "Encrypt=no;TrustServerCertificate=yes;Connection Timeout=30;"
                 )
-                # test pymssql connection
-                with engine2.connect() as conn2:
-                    conn2.execute(sqlalchemy.text("SELECT 1"))
-                return engine2
-            except Exception as e2:
-                raise RuntimeError("pyodbc failed and pymssql fallback also failed; see inner exception") from e2
-        # otherwise re-raise the original error for visibility
-        raise
+                alt_quoted2 = urllib.parse.quote_plus(alt_conn_str2)
+                engine_alt2 = sqlalchemy.create_engine(f"mssql+pyodbc:///?odbc_connect={alt_quoted2}")
+                with engine_alt2.connect() as conn_alt2:
+                    conn_alt2.execute(sqlalchemy.text("SELECT 1"))
+                return engine_alt2
+            except Exception:
+                # If the failure looks like a missing ODBC driver or connection-level failure, try pymssql fallback
+                msg = last_err.lower()
+                try:
+                    import pymssql  # type: ignore
+                    host = server
+                    port = 1433
+                    if "," in server:
+                        parts = server.split(",", 1)
+                        host = parts[0]
+                        try:
+                            port = int(parts[1])
+                        except Exception:
+                            port = 1433
+                    engine2 = sqlalchemy.create_engine(
+                        f"mssql+pymssql://{username}:{urllib.parse.quote_plus(password)}@{host}:{port}/{database}"
+                    )
+                    # test pymssql connection
+                    with engine2.connect() as conn2:
+                        conn2.execute(sqlalchemy.text("SELECT 1"))
+                    try:
+                        st.session_state['db_connect_error'] = None
+                    except Exception:
+                        pass
+                    return engine2
+                except Exception:
+                    # Final fallback: return None and keep last error in session_state for UI display
+                    try:
+                        st.session_state['db_connect_error'] = last_err
+                    except Exception:
+                        pass
+                    return None
 
 
 def test_db_connection(engine):
@@ -120,6 +157,15 @@ def read_table(_engine, table_name, limit=500, where=None):
     except Exception as e:
         # Do not crash the app; return empty df and surface the error where called
         return pd.DataFrame()
+
+
+def _reset_sql_in_session(key, value):
+    """Callback used by Reset buttons to update `st.session_state` before widgets render."""
+    try:
+        st.session_state[key] = value
+    except Exception:
+        # best-effort; Streamlit will show errors elsewhere if this fails
+        pass
 
 
 @st.cache_data(ttl=300)
@@ -270,6 +316,88 @@ def run_sql(engine, sql):
         raise
 
 
+def render_sample_viz(qid: str, df: pd.DataFrame):
+    """Render a small, safe sample visualization for known analytical question outputs.
+    Uses Streamlit built-in charts so no extra plotting deps are required.
+    """
+    if df is None or df.empty:
+        return
+    try:
+        # Q1: Year-over-Year total visits
+        if qid == "q1" and "year" in df.columns:
+            d = df.copy()
+            if "total_visits" in d.columns:
+                d["year"] = pd.to_numeric(d["year"], errors="coerce")
+                d = d.dropna(subset=["year"]).sort_values("year")
+                if not d.empty:
+                    st.subheader("Year-over-Year total visits")
+                    st.line_chart(d.set_index("year")["total_visits"])
+                    return
+
+        # Q2: Best season — counts per season
+        if qid == "q2" and "season" in df.columns:
+            st.subheader("Parks by Season (sample)")
+            counts = df["season"].value_counts().rename_axis("season").reset_index(name="count")
+            st.bar_chart(counts.set_index("season")["count"])  # simple bar
+            return
+
+        # Q3: Parks by state count
+        if qid == "q3" and "state" in df.columns and ("number_of_parks" in df.columns or "count" in df.columns):
+            st.subheader("Parks by state (top 20)")
+            key = "number_of_parks" if "number_of_parks" in df.columns else "count"
+            top = df[["state", key]].groupby("state").sum().sort_values(key, ascending=False).head(20)
+            st.bar_chart(top[key])
+            return
+
+        # Q4: Revenue per visitor
+        if qid == "q4" and "park_name" in df.columns and "estimated_revenue_per_visitor" in df.columns:
+            st.subheader("Estimated revenue per visitor (sample)")
+            sample = df[["park_name", "estimated_revenue_per_visitor"]].dropna()
+            sample = sample.sort_values("estimated_revenue_per_visitor", ascending=False).head(15)
+            st.bar_chart(sample.set_index("park_name")["estimated_revenue_per_visitor"]) 
+            return
+
+        # Q5: Campground cost vs avg camping nights (scatter via Vega-Lite)
+        if qid == "q5" and "avg_cost" in df.columns and "avg_camping_nights" in df.columns:
+            st.subheader("Campground cost vs avg camping nights")
+            spec = {
+                "mark": "point",
+                "encoding": {
+                    "x": {"field": "avg_cost", "type": "quantitative", "title": "Avg Cost"},
+                    "y": {"field": "avg_camping_nights", "type": "quantitative", "title": "Avg camping nights"},
+                    "tooltip": [{"field": "park_name", "type": "nominal"}] if "park_name" in df.columns else []
+                }
+            }
+            st.vega_lite_chart(df.dropna(subset=["avg_cost", "avg_camping_nights"]).head(500), spec, use_container_width=True)
+            return
+
+        # Q6: Rising stars
+        if qid == "q6" and "rise_percent" in df.columns:
+            st.subheader("Top rising parks")
+            sample = df[["park_name", "rise_percent"]].dropna().sort_values("rise_percent", ascending=False).head(15)
+            st.bar_chart(sample.set_index("park_name")["rise_percent"]) 
+            return
+
+        # Q7: State-level stats
+        if qid == "q7" and "state" in df.columns and "total_state_visits" in df.columns:
+            st.subheader("State total visits (sample)")
+            top = df[["state", "total_state_visits"]].groupby("state").sum().sort_values("total_state_visits", ascending=False).head(20)
+            st.bar_chart(top["total_state_visits"]) 
+            return
+
+        # Q8: Falling stars
+        if qid == "q8" and ("decline_percent" in df.columns or "visit_change" in df.columns):
+            st.subheader("Parks needing attention")
+            key = "decline_percent" if "decline_percent" in df.columns else "visit_change"
+            sample = df[["park_name", key]].dropna().sort_values(key).head(15)
+            st.bar_chart(sample.set_index("park_name")[key])
+            return
+
+    except Exception:
+        # Keep visualization best-effort — if anything fails, do not break the app
+        return
+
+
 def main():
     # --- Themed header (map image on the right) and app color palette ---
     # No uploader UI: we will look for an image file in ./assets/ and use the first match.
@@ -312,7 +440,7 @@ def main():
     <div style="position:absolute;inset:0;background-image:url('data:image/{mime};base64,{b64}');background-size:auto 100%;background-repeat:no-repeat;background-position:right center;filter:brightness(0.55) contrast(1.05);"></div>
     <div style="position:absolute;inset:0;background:linear-gradient(90deg, rgba(6,40,21,0.04) 0%, rgba(255,245,230,0.06) 100%);mix-blend-mode:multiply;"></div>
     <div style="position:absolute;left:36px;top:50%;transform:translateY(-50%);text-align:left;padding:0 24px;">
-        <h1 style="margin:0;color:#fff;font-size:40px;font-weight:800;text-shadow:0 6px 20px rgba(0,0,0,0.6);font-family:Helvetica,Arial,sans-serif;">{title_text}</h1>
+        <h1 style="margin:0;color:#000;font-size:64px;line-height:1;font-weight:900;text-shadow:none;font-family:'TW Cen MT Condensed Extra Bold','TW Cen MT Condensed','Arial Black',Arial,sans-serif;">{title_text}</h1>
     </div>
 </div>
 """
@@ -321,8 +449,11 @@ def main():
             except Exception:
                 pass
 
-        # fallback plain title
-        st.markdown(f"<h1 style='color:#0b4d2e'>{title_text}</h1>", unsafe_allow_html=True)
+        # fallback plain title (uses requested condensed font if available)
+        st.markdown(
+            f"<h1 style=\"margin:0;color:#000;font-size:64px;line-height:1;font-family:'TW Cen MT Condensed Extra Bold','TW Cen MT Condensed','Arial Black',Arial,sans-serif;font-weight:900;\">{title_text}</h1>",
+            unsafe_allow_html=True,
+        )
 
     # Apply a National Parks–style color palette via lightweight CSS
 
@@ -339,20 +470,25 @@ def main():
     [data-testid="stSidebar"] { background: linear-gradient(180deg,#0f5d2f,#2a6b38); color: #f5fbf5; }
     [data-testid="stSidebar"] * { color: #f5fbf5 !important; }
 
-    /* Make sidebar headers/titles more visible */
+    /* Make sidebar headers/titles more visible and larger */
     [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, [data-testid="stSidebar"] .css-1lsmgbg {
         color: #ffffff !important;
-        font-size: 20px !important;
-        font-weight: 800 !important;
+        font-size: 22px !important; /* larger for visibility */
+        font-weight: 900 !important;
         letter-spacing: 0.2px;
-        text-shadow: 0 2px 6px rgba(0,0,0,0.45);
+        line-height: 1.05 !important;
+        text-shadow: 0 3px 10px rgba(0,0,0,0.55);
     }
 
-    /* Make sidebar labels slightly larger and bolder for clarity */
-    [data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] label {
-        color: #eef7ee !important;
-        font-weight: 600 !important;
+    /* Make sidebar labels slightly larger, bolder, and clearer */
+    [data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] label, [data-testid="stSidebar"] .stText {
+        color: #f3fbf3 !important;
+        font-weight: 700 !important;
+        font-size: 13px !important;
     }
+
+    /* Emphasize small status badges and code blocks in the sidebar */
+    [data-testid="stSidebar"] .stCode, [data-testid="stSidebar"] code { font-size:12px !important; color:#f7fff7 !important; }
 
     /* Accent colors */
     :root {
@@ -367,7 +503,7 @@ def main():
 
     /* DataFrame / table contrast */
     table { color: #17221a !important; }
-    th { background: #efe8de !important; color: #17221a !important; }
+    th { background: #FFFFFF !important; color: #17221a !important; }
     td { color: #17221a !important; }
 
     /* Expander header readability */
@@ -378,6 +514,39 @@ def main():
 
     /* Make code blocks and SQL snippets more readable */
     .stCodeBlock, code { background:#f3efe6; color:#17221a; }
+
+    /* UI spacing and preview panel styling */
+    .preview-panel { padding: 14px 18px !important; background: #fffdf6 !important; border-radius:10px !important; border:1px solid #e9e0d2 !important; box-shadow: 0 4px 10px rgba(0,0,0,0.03) !important; margin-bottom:14px !important; }
+    .preview-title { color: var(--np-forest) !important; font-weight:700; font-size:16px; margin-bottom:8px; }
+
+    /* Make expanders a bit roomier */
+    .stAppViewContainer .stExpanderContent, .stAppViewContainer .streamlit-expanderContent {
+        padding: 18px !important;
+    }
+
+    /* Inputs: increase padding and subtle border for better contrast */
+    textarea, input[type="text"], .stNumberInput input {
+        padding: 10px !important; border-radius:6px !important; border:1px solid #e6dfd1 !important; background: #fffdf8 !important; color: #17221a !important;
+    }
+
+    /* Buttons: consistent sizing and higher contrast */
+    .stButton>button { padding: 8px 14px !important; font-weight:700 !important; box-shadow:none !important; }
+
+    /* DataFrame / table tile padding */
+    .stAppViewContainer .stDataFrame, .stAppViewContainer .stTable, .stAppViewContainer .element-container {
+        padding: 12px !important;
+    }
+
+    /* Make the preview labels slightly darker for readability */
+    .stMarkdown b, .stMarkdown strong { color: #143723 !important; }
+
+    /* DB status badge and credential styling */
+    .db-badge { display:inline-block; padding:6px 12px; border-radius:10px; color:#fff; font-weight:800; font-size:14px; margin-bottom:8px; }
+    .db-badge-success { background: linear-gradient(90deg,#38b24a,#0f7a2e); box-shadow: 0 4px 12px rgba(15,122,46,0.18); }
+    .db-badge-fail { background: linear-gradient(90deg,#e05d4f,#b22b1a); box-shadow: 0 4px 12px rgba(178,43,26,0.18); }
+    .db-cred-line { padding:6px 8px; border-radius:6px; background: rgba(255,255,255,0.04); color:#f7fff7; margin-bottom:6px; font-weight:700; }
+    .db-cred-label { color: #e6f6e9; font-weight:800; margin-right:6px; }
+    .db-err-block { background:#2b0f0f; color:#ffecec; padding:8px; border-radius:6px; font-size:13px; }
 
     </style>
     """,
@@ -414,22 +583,44 @@ def main():
 
     # Masked display for diagnostics (do not show password)
     st.sidebar.markdown("**DB credential sources**")
-    st.sidebar.write(f"Server: {cred_sources['server']}")
-    st.sidebar.write(f"Database: {cred_sources['database']}")
-    st.sidebar.write(f"Username: {cred_sources['username']}")
-    st.sidebar.write(f"Password: {cred_sources['password']} (hidden)")
+    # Render credential lines using small styled blocks for better contrast
+    creds_html = (
+        f"<div class='db-cred-line'><span class='db-cred-label'>Server:</span> {cred_sources['server']}</div>"
+        f"<div class='db-cred-line'><span class='db-cred-label'>Database:</span> {cred_sources['database']}</div>"
+        f"<div class='db-cred-line'><span class='db-cred-label'>Username:</span> {cred_sources['username']}</div>"
+        f"<div class='db-cred-line'><span class='db-cred-label'>Password:</span> {cred_sources['password']} (hidden)</div>"
+    )
+    st.sidebar.markdown(creds_html, unsafe_allow_html=True)
 
     # Test connection and show any error for debugging
-    ok, err = test_db_connection(engine)
+    # If make_engine returned None but stored a connection error, surface that message to the user
+    err = None
+    ok = False
+    if engine is None:
+        conn_err = None
+        try:
+            conn_err = st.session_state.get('db_connect_error')
+        except Exception:
+            conn_err = None
+        if conn_err:
+            err = conn_err
+        else:
+            err = "No engine (missing credentials)"
+        ok = False
+    else:
+        ok, err = test_db_connection(engine)
+
+    # Show a prominent colored badge for the connection status
     if not ok and err:
-        st.sidebar.error("DB connection test failed — see message below")
-        st.sidebar.code(err)
+        st.sidebar.markdown("<div class='db-badge db-badge-fail'>DB Connection: FAILED</div>", unsafe_allow_html=True)
+        # also show the error in a highlighted block for easier reading
+        st.sidebar.markdown(f"<div class='db-err-block'>{str(err)}</div>", unsafe_allow_html=True)
     elif ok:
-        st.sidebar.success("DB connection test: OK")
+        st.sidebar.markdown("<div class='db-badge db-badge-success'>DB Connection: OK</div>", unsafe_allow_html=True)
 
     # Sidebar: (removed Tableau Embed and OpenAI quick-status per user request)
 
-    page = st.sidebar.radio("Page", ["Home", "Dashboards", "Ask (NLP)"])
+    page = st.sidebar.radio("Page", ["Home", "Dashboards", "Ask"])
 
     if page == "Home":
         st.header("Overview")
@@ -492,7 +683,7 @@ def main():
 
     elif page == "Dashboards":
         st.header("Embedded Dashboard")
-        st.markdown("This page displays the single hardcoded Tableau dashboard.")
+        st.markdown("This page displays the Tableau dashboard.")
         # Render the hardcoded Tableau embed HTML/snippet
         try:
             # Show the embed (the snippet includes the script that loads Tableau JS)
@@ -640,7 +831,7 @@ WITH RecentRise AS (
         LAG(s.recreational_visits + s.non_recreational_visits) OVER (PARTITION BY p.park_code ORDER BY s.year) as prev_year
     FROM park p
     JOIN stats s ON p.park_code = s.park_code
-    WHERE s.year >= (SELECT MAX(year) - 1 FROM stats)
+        WHERE s.year >= DATEADD(year, -1, (SELECT MAX(year) FROM stats))
 )
 SELECT TOP 10
     park_name,
@@ -653,7 +844,7 @@ SELECT TOP 10
 FROM RecentRise
 WHERE prev_year IS NOT NULL
     AND visits > prev_year
-    AND year = (SELECT MAX(year) FROM stats)
+        AND YEAR([year]) = YEAR((SELECT MAX(year) FROM stats))
 ORDER BY rise_percent DESC;
 """,
             },
@@ -689,7 +880,7 @@ WITH RecentDecline AS (
         LAG(s.recreational_visits) OVER (PARTITION BY p.park_code ORDER BY s.year) as prev_year
     FROM park p
     JOIN stats s ON p.park_code = s.park_code
-    WHERE s.year >= (SELECT MAX(year) - 2 FROM stats)
+        WHERE s.year >= DATEADD(year, -2, (SELECT MAX(year) FROM stats))
 )
 SELECT TOP 10
     park_name,
@@ -702,39 +893,26 @@ SELECT TOP 10
 FROM RecentDecline
 WHERE prev_year IS NOT NULL
     AND recreational_visits < prev_year
-    AND year = (SELECT MAX(year) FROM stats)
+        AND YEAR([year]) = YEAR((SELECT MAX(year) FROM stats))
 ORDER BY decline_percent ASC;
 """,
             },
         ]
 
-        # Index hint (display only)
-        index_snippet = (
-            "CREATE NONCLUSTERED INDEX IX_stats_ParkCode_Year\n"
-            "ON dbo.stats (park_code, year)\n"
-            "INCLUDE (\n"
-            "    recreational_visits,\n"
-            "    non_recreational_visits,\n"
-            "    recreational_hours,\n"
-            "    tent_overnights,\n"
-            "    rv_overnights,\n"
-            "    backcountry_overnights,\n"
-            "    concessioner_camping\n"
-            ");"
-        )
+        # Index hint removed per user request
 
         for i, q in enumerate(questions):
             with st.expander(f"{i+1}. {q['title']}"):
                 # Provide an editable SQL area pre-populated with the snippet
                 sql_key = f"sql_{q['id']}"
-                sql_text = st.text_area("SQL (editable)", value=q["sql"], key=sql_key, height=220)
+                # Use existing session_state value if present so reset callback can update it before render
+                initial_sql = st.session_state.get(sql_key, q["sql"])
+                sql_text = st.text_area("SQL (editable)", value=initial_sql, key=sql_key, height=220)
 
                 # Offer a small reset button to restore the original snippet
                 reset_col, run_col = st.columns([1, 1])
                 with reset_col:
-                    if st.button("Reset to snippet", key=f"reset_{q['id']}"):
-                        st.session_state[sql_key] = q["sql"]
-                        sql_text = q["sql"]
+                    st.button("Reset to snippet", key=f"reset_{q['id']}", on_click=_reset_sql_in_session, args=(sql_key, q["sql"]))
                 with run_col:
                     if st.button("Run SQL", key=f"run_{q['id']}"):
                         if engine is None:
@@ -753,13 +931,14 @@ ORDER BY decline_percent ASC;
                                         st.dataframe(df.head(int(max_rows)))
                                     else:
                                         st.dataframe(df)
+                                    # Render a sample visualization for this question if applicable
+                                    render_sample_viz(q['id'], df)
                             except Exception as e:
                                 st.error(f"Failed to execute query: {e}")
 
                 st.write("Use the SQL snippet above as a hint. Edit the SQL as needed before running on your database.")
 
-        with st.expander("Index hint (display only)"):
-            st.code(index_snippet, language="sql")
+        # Index hint display removed.
 
 
 if __name__ == "__main__":
