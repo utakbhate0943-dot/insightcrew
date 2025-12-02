@@ -268,26 +268,43 @@ def infer_latlon_cols(df):
     return lat, lon
 
 
-def render_tableau_embed(url):
+def render_tableau_embed(url_or_html: str, height: int = 1400):
     # Render a Tableau embed snippet or a direct Tableau URL.
-    # If the provided string looks like full embed HTML (starts with '<'),
-    # render it as-is. Otherwise build a simple iframe for the provided URL.
-    # Note: the caller may tune heights or scrolling behavior when invoking
-    # this helper; defaults here are conservative but can be adjusted.
-    if not url:
+    # - If the provided string looks like full embed HTML (starts with '<'),
+    #   attempt to rewrite any hard-coded pixel widths set by the embed script
+    #   so the viz uses `width:100%` and therefore matches the Streamlit container.
+    # - Otherwise build a simple responsive iframe for the provided URL.
+    if not url_or_html:
         st.info("No Tableau URL provided.")
         return
-    # If the input looks like raw embed HTML (starts with '<'), render it directly.
-    trimmed = url.strip()
+
+    trimmed = url_or_html.strip()
+    # If raw embed HTML, try to neutralize fixed-width assignments so the viz becomes responsive
     if trimmed.startswith("<"):
-        # The user pasted the full Tableau embed snippet (HTML + script).
-        # Render raw HTML safely inside Streamlit component.
-        components.html(trimmed, height=1400, scrolling=True)
+        try:
+            import re
+
+            # Replace assignments like vizElement.style.width='900px'; or vizElement.style.width="900px";
+            html_safe = re.sub(r"vizElement\.style\.width\s*=\s*[^;]+;", "vizElement.style.width='100%';", trimmed, flags=re.IGNORECASE)
+            # Also replace any hard-coded width attributes on object/embed tags
+            html_safe = re.sub(r"width=\"\d+px\"", 'width="100%"', html_safe, flags=re.IGNORECASE)
+            html_safe = re.sub(r"width='\d+px'", "width='100%'", html_safe, flags=re.IGNORECASE)
+
+            # Ensure the outer placeholder div will let the embedded object size to container
+            # by forcing object/tableauViz elements to be 100% width via inline CSS
+            style_inject = "<style>.tableauViz, .tableauPlaceholder object, .tableauPlaceholder embed { width:100% !important; max-width:100% !important; }</style>"
+            if style_inject not in html_safe:
+                html_safe = style_inject + html_safe
+
+            components.html(html_safe, height=height, scrolling=True)
+        except Exception:
+            # On any failure, fall back to rendering the original snippet
+            components.html(trimmed, height=height, scrolling=True)
         return
 
-    # Otherwise assume it's a direct URL and render as iframe.
-    iframe = f"<iframe src=\"{url}\" width=100% height=100% frameborder=0></iframe>"
-    components.html(iframe, height=1400)
+    # Otherwise assume it's a direct URL and render as a responsive iframe.
+    iframe = f'<div style="width:100%"><iframe src="{url_or_html}" style="width:100%;height:100%;border:0;" loading="lazy"></iframe></div>'
+    components.html(iframe, height=height, scrolling=True)
 
 
 def nlp_to_sql_openai(prompt_text, engine, max_tokens=256, model="gpt-4o-mini"):
@@ -868,7 +885,8 @@ def main():
         # extensions/CSP. Use a taller height and allow scrolling while
         # troubleshooting; once working you can reduce height/disable scrolling.
         try:
-            components.html(TABLEAU_EMBED_HTML, height=2200, scrolling=True)
+            # Use the render_tableau_embed helper so the embed is made responsive
+            render_tableau_embed(TABLEAU_EMBED_HTML, height=1400)
 
             # Provide a troubleshooting expander so the user can inspect the
             # raw snippet and try a fallback iframe render if needed.
