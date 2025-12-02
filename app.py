@@ -15,7 +15,7 @@ st.set_page_config(page_title="National Parks Intelligence", layout="wide")
 
 # Hardcoded Tableau embed snippet (paste your full embed HTML/JS here)
 TABLEAU_EMBED_HTML = """
-<div class='tableauPlaceholder' id='viz1764260932811' style='position: relative'><noscript><a href='#'><img alt=' ' src='https:&#47;&#47;public.tableau.com&#47;static&#47;images&#47;US&#47;USNationalParksDashboard_17642532718610&#47;NPIntelligentsystem&#47;1_rss.png' style='border: none' /></a></noscript><object class='tableauViz'  style='display:none;'><param name='host_url' value='https%3A%2F%2Fpublic.tableau.com%2F' /> <param name='embed_code_version' value='3' /> <param name='site_root' value='' /><param name='name' value='USNationalParksDashboard_17642532718610&#47;NPIntelligentsystem' /><param name='tabs' value='yes' /><param name='toolbar' value='yes' /><param name='static_image' value='https:&#47;&#47;public.tableau.com&#47;static&#47;images&#47;US&#47;USNationalParksDashboard_17642532718610&#47;NPIntelligentsystem&#47;1.png' /> <param name='animate_transition' value='yes' /><param name='display_static_image' value='yes' /><param name='display_spinner' value='yes' /><param name='display_overlay' value='yes' /><param name='display_count' value='yes' /><param name='language' value='en-US' /><param name='filter' value='publish=yes' /></object></div>                <script type='text/javascript'>                    var divElement = document.getElementById('viz1764260932811');                    var vizElement = divElement.getElementsByTagName('object')[0];                    if ( divElement.offsetWidth > 800 ) { vizElement.style.minWidth='1400px';vizElement.style.maxWidth='100%';vizElement.style.minHeight='1550px';vizElement.style.maxHeight=(divElement.offsetWidth*0.75)+'px';} else if ( divElement.offsetWidth > 500 ) { vizElement.style.minWidth='1400px';vizElement.style.maxWidth='100%';vizElement.style.minHeight='1550px';vizElement.style.maxHeight=(divElement.offsetWidth*0.75)+'px';} else { vizElement.style.width='100%';vizElement.style.minHeight='2450px';vizElement.style.maxHeight=(divElement.offsetWidth*1.77)+'px';}                     var scriptElement = document.createElement('script');                    scriptElement.src = 'https://public.tableau.com/javascripts/api/viz_v1.js';                    vizElement.parentNode.insertBefore(scriptElement, vizElement);                </script>
+<div class='tableauPlaceholder' id='viz1764637863337' style='position: relative'><noscript><a href='#'><img alt=' ' src='https:&#47;&#47;public.tableau.com&#47;static&#47;images&#47;US&#47;USNationalParksDashboard_17642532718610&#47;ExplorerGuide&#47;1_rss.png' style='border: none' /></a></noscript><object class='tableauViz'  style='display:none;'><param name='host_url' value='https%3A%2F%2Fpublic.tableau.com%2F' /> <param name='embed_code_version' value='3' /> <param name='site_root' value='' /><param name='name' value='USNationalParksDashboard_17642532718610&#47;ExplorerGuide' /><param name='tabs' value='yes' /><param name='toolbar' value='yes' /><param name='static_image' value='https:&#47;&#47;public.tableau.com&#47;static&#47;images&#47;US&#47;USNationalParksDashboard_17642532718610&#47;ExplorerGuide&#47;1.png' /> <param name='animate_transition' value='yes' /><param name='display_static_image' value='yes' /><param name='display_spinner' value='yes' /><param name='display_overlay' value='yes' /><param name='display_count' value='yes' /><param name='language' value='en-US' /></object></div>                <script type='text/javascript'>                    var divElement = document.getElementById('viz1764637863337');                    var vizElement = divElement.getElementsByTagName('object')[0];                    if ( divElement.offsetWidth > 800 ) { vizElement.style.width='900px';vizElement.style.height='1250px';} else if ( divElement.offsetWidth > 500 ) { vizElement.style.width='900px';vizElement.style.height='1250px';} else { vizElement.style.width='100%';vizElement.style.height='2450px';}                     var scriptElement = document.createElement('script');                    scriptElement.src = 'https://public.tableau.com/javascripts/api/viz_v1.js';                    vizElement.parentNode.insertBefore(scriptElement, vizElement);                </script>
 """
 
 # ---------------------------------------------------------------------------
@@ -817,12 +817,45 @@ def main():
     elif page == "Dashboards":
         st.header("Embedded Dashboard")
         st.markdown("This page displays the Tableau dashboard.")
-        # Render the hardcoded Tableau embed HTML/snippet
+        # Try rendering the raw embed snippet first. Some Tableau embeds require
+        # external JS that may take longer to load or be blocked by browser
+        # extensions/CSP. Use a taller height and allow scrolling while
+        # troubleshooting; once working you can reduce height/disable scrolling.
         try:
-            # Show the embed (the snippet includes the script that loads Tableau JS)
-            # Use a taller default height and disable internal scrolling so the viz fits the Streamlit page.
-            # If you still see scrollbars, increase `height` as needed for your dashboard content.
-            components.html(TABLEAU_EMBED_HTML, height=1800, scrolling=False)
+            components.html(TABLEAU_EMBED_HTML, height=2200, scrolling=True)
+
+            # Provide a troubleshooting expander so the user can inspect the
+            # raw snippet and try a fallback iframe render if needed.
+            with st.expander("Troubleshoot embed (show raw snippet / try fallback)"):
+                st.markdown("If the dashboard does not appear, copy the raw embed HTML and check the browser console for errors (CSP/script load issues).")
+                st.code(TABLEAU_EMBED_HTML[:1000] + ("..." if len(TABLEAU_EMBED_HTML) > 1000 else ""), language="html")
+                if st.button("Render fallback iframe", key="render_tableau_fallback"):
+                    # Try a safer iframe-only render in case the full embed HTML
+                    # with script tags is being blocked. Attempt to extract a
+                    # plausible URL by searching for 'src=' or host_url param.
+                    def extract_url_from_embed(embed_html: str) -> str | None:
+                        # look for a src="..." inside the snippet
+                        import re
+                        m = re.search(r"src=\"([^\"]+)\"", embed_html)
+                        if m:
+                            return m.group(1)
+                        # try to extract host_url param value (url encoded)
+                        m2 = re.search(r"<param name='host_url' value='([^']+)'", embed_html)
+                        if m2:
+                            return m2.group(1)
+                        return None
+
+                    url = extract_url_from_embed(TABLEAU_EMBED_HTML)
+                    if url:
+                        st.info("Attempting iframe fallback render (may require a public URL).")
+                        # If we found a URL, render it in an iframe via helper
+                        try:
+                            render_tableau_embed(url)
+                        except Exception as e:
+                            st.error(f"Fallback iframe render failed: {e}")
+                    else:
+                        st.warning("Could not find a fallback URL inside the embed snippet. Check browser console for script errors.")
+
         except Exception as e:
             st.error(f"Failed to render embedded dashboard: {e}")
 
