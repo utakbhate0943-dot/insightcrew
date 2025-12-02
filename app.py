@@ -18,10 +18,33 @@ TABLEAU_EMBED_HTML = """
 <div class='tableauPlaceholder' id='viz1764260932811' style='position: relative'><noscript><a href='#'><img alt=' ' src='https:&#47;&#47;public.tableau.com&#47;static&#47;images&#47;US&#47;USNationalParksDashboard_17642532718610&#47;NPIntelligentsystem&#47;1_rss.png' style='border: none' /></a></noscript><object class='tableauViz'  style='display:none;'><param name='host_url' value='https%3A%2F%2Fpublic.tableau.com%2F' /> <param name='embed_code_version' value='3' /> <param name='site_root' value='' /><param name='name' value='USNationalParksDashboard_17642532718610&#47;NPIntelligentsystem' /><param name='tabs' value='yes' /><param name='toolbar' value='yes' /><param name='static_image' value='https:&#47;&#47;public.tableau.com&#47;static&#47;images&#47;US&#47;USNationalParksDashboard_17642532718610&#47;NPIntelligentsystem&#47;1.png' /> <param name='animate_transition' value='yes' /><param name='display_static_image' value='yes' /><param name='display_spinner' value='yes' /><param name='display_overlay' value='yes' /><param name='display_count' value='yes' /><param name='language' value='en-US' /><param name='filter' value='publish=yes' /></object></div>                <script type='text/javascript'>                    var divElement = document.getElementById('viz1764260932811');                    var vizElement = divElement.getElementsByTagName('object')[0];                    if ( divElement.offsetWidth > 800 ) { vizElement.style.minWidth='1400px';vizElement.style.maxWidth='100%';vizElement.style.minHeight='1550px';vizElement.style.maxHeight=(divElement.offsetWidth*0.75)+'px';} else if ( divElement.offsetWidth > 500 ) { vizElement.style.minWidth='1400px';vizElement.style.maxWidth='100%';vizElement.style.minHeight='1550px';vizElement.style.maxHeight=(divElement.offsetWidth*0.75)+'px';} else { vizElement.style.width='100%';vizElement.style.minHeight='2450px';vizElement.style.maxHeight=(divElement.offsetWidth*1.77)+'px';}                     var scriptElement = document.createElement('script');                    scriptElement.src = 'https://public.tableau.com/javascripts/api/viz_v1.js';                    vizElement.parentNode.insertBefore(scriptElement, vizElement);                </script>
 """
 
+# ---------------------------------------------------------------------------
+# Module: app.py
+# Purpose: Streamlit web app for exploring a National Parks database and
+#          embedding Tableau dashboards. Key features:
+#   - Connect to an MSSQL database using credentials from env/.env or
+#     Streamlit secrets.
+#   - List and preview tables and views (schema, row count, sample rows).
+#   - Simple NLP-to-SQL helper (uses OpenAI if configured) and several
+#     pre-built analytical SQL snippets with sample visualizations.
+#   - Embed a Tableau dashboard via raw HTML/iframe.
+#
+# High-level section layout:
+#   1) DB connection helpers and engine creation
+#   2) Convenience cached functions for listing/reading tables/views
+#   3) Helper utilities (schema inference, tableau embed rendering)
+#   4) Main Streamlit UI: Header, Sidebar (DB creds/status), Pages
+#      - Home: table/view preview
+#      - Dashboards: embedded Tableau
+#      - Ask: analytical SQL snippets + run/visualize
+# ---------------------------------------------------------------------------
+
 
 def get_db_config():
+    # DB credential resolution
     # Prefer environment variables (or .env via load_dotenv()),
     # but fall back to Streamlit secrets when available (deployed on Streamlit Cloud).
+    # Returns: (server, database, username, password, driver)
     def _get(key, default=None):
         v = os.getenv(key)
         if v:
@@ -41,6 +64,12 @@ def get_db_config():
 
 @st.cache_resource
 def make_engine(server, database, username, password, driver):
+    # Build a SQLAlchemy engine using pyodbc by default.
+    # The function attempts multiple fallbacks to handle common environment issues:
+    #  - try a strict encrypted pyodbc connection
+    #  - retry trusting the server certificate
+    #  - try with Encrypt=no
+    #  - fallback to pymssql if pyodbc/ODBC driver is not available
     if not (server and database and username and password):
         return None
     # First try using pyodbc (requires system ODBC driver e.g. msodbcsql17/18)
@@ -122,8 +151,13 @@ def make_engine(server, database, username, password, driver):
 
 
 def test_db_connection(engine):
-    """Attempt a minimal DB connection and return (ok, error_message).
-    This does not log credentials; any returned error may help diagnose network/driver issues.
+    """
+    Attempt a minimal DB connection and return (ok, error_message).
+    This check executes a lightweight "SELECT 1" to verify connectivity and
+    surface a human-readable error (without exposing credentials) for diagnostics.
+    Returns:
+      (True, None) on success
+      (False, error_message) on failure
     """
     if engine is None:
         return False, "No engine (missing credentials)"
@@ -139,6 +173,7 @@ def test_db_connection(engine):
 
 @st.cache_data(ttl=60)
 def list_tables(_engine):
+    # Return a list of fully-qualified table names (schema.table)
     try:
         sql = "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE'"
         df = pd.read_sql(sql, _engine)
@@ -148,8 +183,23 @@ def list_tables(_engine):
         return []
 
 
+@st.cache_data(ttl=60)
+def list_views(_engine):
+    # Return a list of fully-qualified view names (schema.view)
+    try:
+        sql = "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS"
+        df = pd.read_sql(sql, _engine)
+        df["full_name"] = df["TABLE_SCHEMA"] + "." + df["TABLE_NAME"]
+        return df["full_name"].tolist()
+    except Exception:
+        return []
+
+
 @st.cache_data(ttl=30)
 def read_table(_engine, table_name, limit=500, where=None):
+    # Read a limited number of rows from a table or view. This helper is
+    # intentionally conservative: it always applies a TOP(limit) to avoid
+    # accidental large table scans in the UI.
     try:
         where_clause = f" WHERE {where}" if where and where.strip() else ""
         query = f"SELECT TOP ({limit}) * FROM {table_name}{where_clause}"
@@ -167,9 +217,16 @@ def _reset_sql_in_session(key, value):
         # best-effort; Streamlit will show errors elsewhere if this fails
         pass
 
+    # Note: this helper is intentionally tiny and defensive because it's used
+    # as a callback for Streamlit buttons. It updates session_state so that
+    # the editable SQL textareas can be reset to their original snippets.
+
 
 @st.cache_data(ttl=300)
 def get_table_schema(_engine, table_name):
+    # Return column names and data types for a table or view using
+    # INFORMATION_SCHEMA.COLUMNS. The function accepts fully-qualified
+    # names (schema.table) or a simple table name (defaults to dbo).
     try:
         if '.' in table_name:
             schema, tbl = table_name.split('.', 1)
@@ -188,6 +245,9 @@ def get_table_schema(_engine, table_name):
 
 @st.cache_data(ttl=300)
 def get_table_row_count(_engine, table_name):
+    # Return the total row count for a table or view. Note: this can be
+    # expensive on very large objects; we use it here for a diagnostic
+    # display in the UI (row count shown to the user).
     try:
         sql = f"SELECT COUNT(*) as cnt FROM {table_name}"
         df = pd.read_sql(sql, _engine)
@@ -197,6 +257,8 @@ def get_table_row_count(_engine, table_name):
 
 
 def infer_latlon_cols(df):
+    # Heuristic to detect latitude/longitude column names in a DataFrame.
+    # Returns (lat_col_name, lon_col_name) or (None, None) if not found.
     if df.empty:
         return None, None
     lat_candidates = [c for c in df.columns if c.lower() in ("latitude", "lat")]
@@ -207,6 +269,11 @@ def infer_latlon_cols(df):
 
 
 def render_tableau_embed(url):
+    # Render a Tableau embed snippet or a direct Tableau URL.
+    # If the provided string looks like full embed HTML (starts with '<'),
+    # render it as-is. Otherwise build a simple iframe for the provided URL.
+    # Note: the caller may tune heights or scrolling behavior when invoking
+    # this helper; defaults here are conservative but can be adjusted.
     if not url:
         st.info("No Tableau URL provided.")
         return
@@ -215,18 +282,23 @@ def render_tableau_embed(url):
     if trimmed.startswith("<"):
         # The user pasted the full Tableau embed snippet (HTML + script).
         # Render raw HTML safely inside Streamlit component.
-        components.html(trimmed, height=900, scrolling=True)
+        components.html(trimmed, height=1400, scrolling=True)
         return
 
     # Otherwise assume it's a direct URL and render as iframe.
-    iframe = f"<iframe src=\"{url}\" width=100% height=1800 frameborder=0></iframe>"
-    components.html(iframe, height=1500)
+    iframe = f"<iframe src=\"{url}\" width=100% height=100% frameborder=0></iframe>"
+    components.html(iframe, height=1400)
 
 
 def nlp_to_sql_openai(prompt_text, engine, max_tokens=256, model="gpt-4o-mini"):
-    # This function expects OPENAI_API_KEY set in env. Uses OpenAI to produce a SQL SELECT only.
-    # Prefer the new OpenAI client if available (openai>=1.0.0). Fall back to the older
-    # openai.ChatCompletion interface for compatibility with older installs.
+    # NLP -> SQL using OpenAI (optional)
+    # This helper asks OpenAI to translate a natural language prompt into a
+    # single T-SQL SELECT statement. It attempts to use the newer OpenAI
+    # client API if available; otherwise it falls back to the legacy
+    # openai.ChatCompletion interface. The function enforces several safety
+    # checks (only SELECT, limits via TOP) to avoid destructive or expensive
+    # generated SQL.
+    # NOTE: This requires an OPENAI_API_KEY in your environment to work.
     schema_hint = "\n".join(list_tables(engine)[:10]) if engine is not None else "(schema not available)"
 
     system_prompt = (
@@ -309,6 +381,8 @@ def nlp_to_sql_openai(prompt_text, engine, max_tokens=256, model="gpt-4o-mini"):
 
 
 def run_sql(engine, sql):
+    # Execute a SQL query and return a pandas DataFrame. Exceptions are
+    # propagated to the caller so the UI can display a helpful error message.
     try:
         df = pd.read_sql(sql, engine)
         return df
@@ -323,6 +397,9 @@ def render_sample_viz(qid: str, df: pd.DataFrame):
     if df is None or df.empty:
         return
     try:
+        # This function contains hard-coded small visualizations keyed by
+        # question id (qid). The visuals are intentionally simple and
+        # use only Streamlit's built-in charts so the app remains lightweight.
         # Q1: Year-over-Year total visits
         if qid == "q1" and "year" in df.columns:
             d = df.copy()
@@ -399,7 +476,15 @@ def render_sample_viz(qid: str, df: pd.DataFrame):
 
 
 def main():
-    # --- Themed header (map image on the right) and app color palette ---
+    # Main Streamlit app
+    # This function builds the entire UI. High-level flow:
+    #  - Render header (optional image from ./assets/)
+    #  - Inject CSS theme for the app
+    #  - Sidebar: display DB credential sources and connection status
+    #  - Page selector with three pages: Home, Dashboards, Ask
+    #      * Home: preview tables and views with schema/count/download
+    #      * Dashboards: embed Tableau HTML/iframe
+    #      * Ask: pre-written analytical SQL snippets (editable) + Run
     # No uploader UI: we will look for an image file in ./assets/ and use the first match.
     assets_dir = Path("assets")
     assets_dir.mkdir(exist_ok=True)
@@ -620,7 +705,7 @@ def main():
 
     # Sidebar: (removed Tableau Embed and OpenAI quick-status per user request)
 
-    page = st.sidebar.radio("Page", ["Home", "Dashboards", "Ask"])
+    page = st.sidebar.radio("Page", ["Home", "Dashboards", "Gallery", "Ask"])
 
     if page == "Home":
         st.header("Overview")
@@ -681,15 +766,184 @@ def main():
                         csv = df.to_csv(index=False).encode('utf-8')
                         st.download_button("Download preview as CSV", data=csv, file_name=f"{selected.replace('.','_')}_preview.csv", mime='text/csv')
 
+                    # --- Views: allow previewing views in the same database ---
+                    views = list_views(engine)
+                    st.subheader("Available views")
+                    if not views:
+                        st.write("(no views found or cannot connect)")
+                    else:
+                        selected_view = st.selectbox("Choose a view to preview", options=views)
+                        if selected_view:
+                            st.subheader(f"Preview: {selected_view}")
+
+                            # Show schema and row count for view
+                            v_schema_df = get_table_schema(engine, selected_view)
+                            v_row_count = get_table_row_count(engine, selected_view)
+                            vcol1, vcol2 = st.columns([3,1])
+                            with vcol1:
+                                if not v_schema_df.empty:
+                                    st.markdown("**Columns (name : type)**")
+                                    st.write(v_schema_df.set_index('COLUMN_NAME')['DATA_TYPE'].to_dict())
+                                else:
+                                    st.info("Could not retrieve column schema for view")
+                            with vcol2:
+                                st.markdown("**Row count**")
+                                st.write(v_row_count if v_row_count is not None else "unknown")
+
+                            st.markdown("---")
+                            st.markdown("**Preview options**")
+                            v_max_rows = st.number_input("Limit view rows", min_value=10, max_value=5000, value=50, step=10, key="view_limit")
+
+                            v_df = read_table(engine, selected_view, limit=int(v_max_rows), where=None)
+                            if v_df is None or v_df.empty:
+                                st.info("No rows available for this view or failed to read.")
+                            else:
+                                st.dataframe(v_df)
+                                v_lat, v_lon = infer_latlon_cols(v_df)
+                                if v_lat and v_lon:
+                                    v_map_df = v_df.rename(columns={v_lat: "latitude", v_lon: "longitude"})[["latitude", "longitude"]].copy()
+                                    v_map_df["latitude"] = pd.to_numeric(v_map_df["latitude"], errors='coerce')
+                                    v_map_df["longitude"] = pd.to_numeric(v_map_df["longitude"], errors='coerce')
+                                    v_map_df = v_map_df.dropna()
+                                    if not v_map_df.empty:
+                                        st.map(v_map_df)
+                                    else:
+                                        st.info("No valid numeric latitude/longitude values to map for this view preview.")
+
+                                # Download as CSV for view
+                                v_csv = v_df.to_csv(index=False).encode('utf-8')
+                                st.download_button("Download view preview as CSV", data=v_csv, file_name=f"{selected_view.replace('.','_')}_preview.csv", mime='text/csv')
+
     elif page == "Dashboards":
         st.header("Embedded Dashboard")
         st.markdown("This page displays the Tableau dashboard.")
         # Render the hardcoded Tableau embed HTML/snippet
         try:
             # Show the embed (the snippet includes the script that loads Tableau JS)
-            components.html(TABLEAU_EMBED_HTML, height=1000, scrolling=True)
+            # Use a taller default height and disable internal scrolling so the viz fits the Streamlit page.
+            # If you still see scrollbars, increase `height` as needed for your dashboard content.
+            components.html(TABLEAU_EMBED_HTML, height=1800, scrolling=False)
         except Exception as e:
             st.error(f"Failed to render embedded dashboard: {e}")
+
+    elif page == "Gallery":
+        # Simplified Gallery: automatically show images and titles (full name, state)
+        # without asking the user to choose table/column names. This assumes a
+        # park-like table exists (e.g. dbo.park) with columns such as
+        # 'fullname'/'name' and 'state' and an image column like 'images'.
+        st.header("Gallery — Parks")
+        st.markdown("Images with title (full name, state) — no selection required.")
+
+        if engine is None:
+            st.warning("Database not connected. Provide credentials in environment or .env.")
+        else:
+            tables = list_tables(engine)
+            if not tables:
+                st.info("No tables found to build a gallery.")
+            else:
+                # choose a park-like table automatically (prefer dbo.park)
+                chosen_table = None
+                lowercase_tables = [t.lower() for t in tables]
+                if "dbo.park" in lowercase_tables:
+                    chosen_table = tables[lowercase_tables.index("dbo.park")]
+                else:
+                    # prefer any table that ends with '.park' or contains 'park'
+                    for t in tables:
+                        if t.lower().endswith('.park') or '.park' in t.lower() or t.lower().endswith('park'):
+                            chosen_table = t
+                            break
+                if not chosen_table:
+                    # fallback to first table
+                    chosen_table = tables[0]
+
+                # sensible defaults for columns
+                schema = get_table_schema(engine, chosen_table)
+                cols = list(schema['COLUMN_NAME']) if not schema.empty else []
+
+                # find label (fullname/name) and state columns
+                def find_ci(names, available):
+                    for n in names:
+                        for a in available:
+                            if a.lower() == n.lower():
+                                return a
+                    return None
+
+                label_col = find_ci(["fullname", "full_name", "name", "park_name"], cols) or (cols[0] if cols else None)
+                state_col = find_ci(["state", "st", "region"], cols) or None
+                img_col = find_ci(["images", "image", "img", "photo", "picture", "thumbnail", "thumb", "url", "logo"], cols) or None
+
+                limit = st.number_input("Limit items", min_value=6, max_value=1000, value=60, step=6, key="gallery_limit")
+
+                preview_df = read_table(engine, chosen_table, limit=int(limit), where=None)
+                if preview_df is None or preview_df.empty:
+                    st.info("No rows available for the gallery or failed to read.")
+                else:
+                    available_cols = preview_df.columns.tolist()
+                    # resolve actual column names (case-insensitive)
+                    def resolve(col):
+                        if not col:
+                            return None
+                        for a in available_cols:
+                            if a.lower() == col.lower():
+                                return a
+                        return None
+
+                    label_actual = resolve(label_col) or (available_cols[0] if available_cols else None)
+                    state_actual = resolve(state_col)
+                    img_actual = resolve(img_col) or (next((c for c in available_cols if any(k in c.lower() for k in ("image","img","photo","picture","thumb","url","logo","images"))), None))
+
+                    st.markdown(f"**Gallery source:** `{chosen_table}` — showing up to {limit} items")
+
+                    # Build list of records with label and image
+                    records = []
+                    for _, r in preview_df.iterrows():
+                        title_parts = []
+                        if label_actual and pd.notna(r.get(label_actual)):
+                            title_parts.append(str(r.get(label_actual)))
+                        if state_actual and pd.notna(r.get(state_actual)):
+                            title_parts.append(str(r.get(state_actual)))
+                        title = ", ".join(title_parts) if title_parts else ""
+                        img_val = r.get(img_actual) if img_actual in preview_df.columns else None
+                        if pd.isna(img_val):
+                            continue
+                        records.append({"title": title, "img": img_val})
+
+                    if not records:
+                        st.info("No image data found in the detected image column for gallery.")
+                    else:
+                        per_row = 3
+                        num = len(records)
+                        for i in range(0, num, per_row):
+                            chunk = records[i:i+per_row]
+                            cols_iter = st.columns(len(chunk))
+                            for cslot, item in zip(cols_iter, chunk):
+                                with cslot:
+                                    label = item.get("title", "")
+                                    img_val = item.get("img")
+                                    if isinstance(img_val, (bytes, bytearray, memoryview)):
+                                        try:
+                                            st.image(io.BytesIO(img_val), caption=label, use_column_width=True)
+                                        except Exception:
+                                            st.write(label)
+                                            st.write("(unable to render binary image)")
+                                    elif isinstance(img_val, str):
+                                        v = img_val.strip()
+                                        if v.startswith("data:") or v.startswith("http://") or v.startswith("https://"):
+                                            try:
+                                                st.image(v, caption=label, use_column_width=True)
+                                            except Exception:
+                                                st.write(label)
+                                                st.write("(broken image URL)")
+                                        else:
+                                            try:
+                                                b = base64.b64decode(v)
+                                                st.image(io.BytesIO(b), caption=label, use_column_width=True)
+                                            except Exception:
+                                                st.write(label)
+                                                st.code(v[:200] + ("..." if len(v) > 200 else ""))
+                                    else:
+                                        st.write(label)
+                                        st.write("(unsupported image type)")
 
     else:
         st.header("Ask — Analytical Questions")
