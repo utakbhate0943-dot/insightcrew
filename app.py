@@ -390,6 +390,47 @@ def run_sql(engine, sql):
         raise
 
 
+def sanitize_sql_for_run(sql_text: str, max_limit: int = 500) -> str:
+    """
+    Basic static validation / sanitization for user-provided SQL before execution.
+    - Blocks forbidden keywords (INSERT/UPDATE/DELETE/DROP/etc).
+    - If the query is a plain SELECT without TOP/GROUP BY/WITH, injects a TOP(max_limit)
+      to avoid accidental large scans.
+
+    This is intentionally conservative and performs textual heuristics only.
+    """
+    if not sql_text or not isinstance(sql_text, str):
+        return sql_text
+
+    lowered = sql_text.lower()
+    # Block potentially destructive keywords
+    forbidden = ["insert ", "update ", "delete ", "drop ", "alter ", "create ", "truncate ", "exec ", "sp_"]
+    for k in forbidden:
+        if k in lowered:
+            raise RuntimeError(f"Blocked forbidden keyword in SQL: {k.strip()}")
+
+    # If the SQL starts with WITH (CTE) or contains GROUP BY/UNION/LIMIT/TOP, avoid modifying
+    starts_with_with = lowered.lstrip().startswith("with ")
+    contains_group = "group by" in lowered
+    contains_union = "union" in lowered
+    contains_top = "select top" in lowered or "top (" in lowered
+    contains_limit = " limit " in lowered
+
+    if starts_with_with or contains_group or contains_union or contains_top or contains_limit:
+        return sql_text
+
+    # If it's a plain SELECT without TOP, add a TOP(...) after the first SELECT
+    stripped = sql_text.lstrip()
+    if stripped.lower().startswith("select") and not contains_top:
+        # insert TOP after the first SELECT token
+        # preserve original casing for 'SELECT'
+        prefix = sql_text[: sql_text.lower().find("select")]
+        rest = sql_text[sql_text.lower().find("select") + len("select"):]
+        return prefix + "SELECT TOP (" + str(int(max_limit)) + ")" + rest
+
+    return sql_text
+
+
 def render_sample_viz(qid: str, df: pd.DataFrame):
     """Render a small, safe sample visualization for known analytical question outputs.
     Uses Streamlit built-in charts so no extra plotting deps are required.
@@ -1002,26 +1043,25 @@ def main():
                 "id": "q1",
                 "title": "Year-over-Year Total Visits Growth (Line Chart) (vw_YearOverYearVisits)",
                 "sql": """
-SELECT 
-    year,
-    SUM(recreational_visits) + SUM(non_recreational_visits)  as total_visits,
-    (SUM(recreational_visits) + SUM(non_recreational_visits)) - LAG(SUM(recreational_visits) + SUM(non_recreational_visits)) OVER (ORDER BY year) as visit_change
+SELECT
+   year,
+   SUM(recreational_visits) + SUM(non_recreational_visits)  as total_visits,
+   (SUM(recreational_visits) + SUM(non_recreational_visits)) - LAG(SUM(recreational_visits) + SUM(non_recreational_visits)) OVER (ORDER BY year) as visit_change
 FROM stats
-GROUP BY year
-ORDER BY year;
+GROUP BY year;
 """,
             },
             {
                 "id": "q2",
                 "title": "Right Season to visit the park (vw_BestSeasonToVisit)",
                 "sql": """
-SELECT 
-    p.park_code,
-    p.name as park_name,
-    s.type_of_season as season,
-    s.[Good] as good_months,
-    s.[Limited] as limited_months,
-    s.[closed] as closed_months
+SELECT
+   p.park_code,
+   p.name as park_name,
+   s.type_of_season as season,
+   s.[Good] as good_months,
+   s.[Limited] as limited_months,
+   s.[closed] as closed_months
 FROM park p
 JOIN seasons s ON p.park_code = s.park_code
 WHERE s.[Good] IS NOT NULL;
@@ -1031,12 +1071,11 @@ WHERE s.[Good] IS NOT NULL;
                 "id": "q3",
                 "title": "Parks by State Count (Map) (vw_ParksByStateCount)",
                 "sql": """
-SELECT 
-    state,
-    COUNT(*) as number_of_parks
+SELECT
+   state,
+   COUNT(*) as number_of_parks
 FROM park
-GROUP BY state
-ORDER BY number_of_parks DESC;
+GROUP BY state;
 """,
             },
             {
@@ -1044,69 +1083,67 @@ ORDER BY number_of_parks DESC;
                 "title": "Revenue Per Visitor by Fee Structure (vw_RevenuePerVisitor)",
                 "sql": """
 WITH ParkRevenue AS (
-    SELECT 
-        fp.park_code,
-        p.name as park_name,
-        fp.is_entry_free,
-        fp.is_parking_free,
-        AVG(fp.entry_fee) as avg_entry_fee,
-        AVG(fp.pass_cost) as avg_pass_cost,
-        CASE 
-            WHEN fp.is_entry_free = 1 THEN 'Free Entry'
-            ELSE 'Paid Entry'
-        END as fee_structure
-    FROM feespasses fp
-    JOIN park p ON fp.park_code = p.park_code
-    GROUP BY fp.park_code, p.name, fp.is_entry_free, fp.is_parking_free
+   SELECT
+       fp.park_code,
+       p.name as park_name,
+       fp.is_entry_free,
+       fp.is_parking_free,
+       AVG(fp.entry_fee) as avg_entry_fee,
+       AVG(fp.pass_cost) as avg_pass_cost,
+       CASE
+           WHEN fp.is_entry_free = 1 THEN 'Free Entry'
+           ELSE 'Paid Entry'
+       END as fee_structure
+   FROM feespasses fp
+   JOIN park p ON fp.park_code = p.park_code
+   GROUP BY fp.park_code, p.name, fp.is_entry_free, fp.is_parking_free
 ),
 VisitorStats AS (
-    SELECT 
-        park_code,
-        ROUND(AVG(recreational_visits) + AVG(non_recreational_visits), 2) as avg_annual_visits
-    FROM stats
-    GROUP BY park_code
+   SELECT
+       park_code,
+       ROUND(AVG(recreational_visits) + AVG(non_recreational_visits), 2) as avg_annual_visits
+   FROM stats
+   GROUP BY park_code
 )
-SELECT 
-    pr.park_code,
-    pr.park_name,
-    pr.fee_structure,
-    pr.is_parking_free,
-    ROUND(pr.avg_entry_fee, 2) as avg_entry_fee,
-    pr.avg_pass_cost,
-    vs.avg_annual_visits,
-    CASE 
-        WHEN vs.avg_annual_visits > 0 
-        THEN ROUND((COALESCE(pr.avg_entry_fee, 0) * vs.avg_annual_visits) / vs.avg_annual_visits, 2)
-        ELSE 0 
-    END as estimated_revenue_per_visitor,
-    ROUND(pr.avg_pass_cost / NULLIF(pr.avg_entry_fee, 0), 2) as pass_to_entry_ratio
+SELECT
+   pr.park_code,
+   pr.park_name,
+   pr.fee_structure,
+   pr.is_parking_free,
+   ROUND(pr.avg_entry_fee, 2) as avg_entry_fee,
+   pr.avg_pass_cost,
+   vs.avg_annual_visits,
+   CASE
+       WHEN vs.avg_annual_visits > 0
+       THEN ROUND((COALESCE(pr.avg_entry_fee, 0) * vs.avg_annual_visits) / vs.avg_annual_visits, 2)
+       ELSE 0
+   END as estimated_revenue_per_visitor,
+   ROUND(pr.avg_pass_cost / NULLIF(pr.avg_entry_fee, 0), 2) as pass_to_entry_ratio
 FROM ParkRevenue pr
-LEFT JOIN VisitorStats vs ON pr.park_code = vs.park_code
-ORDER BY fee_structure, estimated_revenue_per_visitor DESC;
+LEFT JOIN VisitorStats vs ON pr.park_code = vs.park_code;
 """,
             },
             {
                 "id": "q5",
-                "title": "Campground Cost-to-Capacity & Occupancy (vw_CampgroundCostCapacityAnalysis)",
+                "title": "Which parks have the best cost-to-capacity ratio for campgrounds (vw_CampgroundCostCapacityAnalysis)",
                 "sql": """
-SELECT 
-    p.name as park_name,
-    p.state,
-    COUNT(DISTINCT c.campgrounds_id) as num_campgrounds,
-    ROUND(AVG(c.cost), 2) as avg_cost,
-    ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights), 0) as avg_camping_nights,
-    ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights) / 
-          NULLIF(COUNT(DISTINCT c.campgrounds_id), 0), 0) as nights_per_campground,
-    ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights) / 
-          NULLIF(AVG(c.cost), 0), 0) as efficiency_score
+SELECT
+   p.name as park_name,
+   p.state,
+   COUNT(DISTINCT c.campgrounds_id) as num_campgrounds,
+   ROUND(AVG(c.cost), 2) as avg_cost,
+   ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights), 0) as avg_camping_nights,
+   ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights) /
+         NULLIF(COUNT(DISTINCT c.campgrounds_id), 0), 0) as nights_per_campground,
+   ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights) /
+         NULLIF(AVG(c.cost), 0), 0) as efficiency_score
 FROM park p
 JOIN campgrounds c ON p.park_code = c.park_code
 JOIN stats s ON p.park_code = s.park_code
-    AND c.cost IS NOT NULL
-    AND c.cost > 0
+   AND c.cost IS NOT NULL
+   AND c.cost > 0
 GROUP BY p.name, p.state
-HAVING COUNT(DISTINCT c.campgrounds_id) > 0
-ORDER BY efficiency_score DESC;
+HAVING COUNT(DISTINCT c.campgrounds_id) > 0;
 """,
             },
             {
@@ -1114,48 +1151,59 @@ ORDER BY efficiency_score DESC;
                 "title": "Rising Stars (vw_RisingStarParks)",
                 "sql": """
 WITH RecentRise AS (
-    SELECT 
-        p.park_code,
-        p.name as park_name,
-        p.state,
-        s.year,
-        s.recreational_visits + s.non_recreational_visits as visits,
-        LAG(s.recreational_visits + s.non_recreational_visits) OVER (PARTITION BY p.park_code ORDER BY s.year) as prev_year
-    FROM park p
-    JOIN stats s ON p.park_code = s.park_code
-        WHERE s.year >= DATEADD(year, -1, (SELECT MAX(year) FROM stats))
+   SELECT
+       p.park_code,
+       p.name as park_name,
+       p.state,
+       s.year,
+       s.recreational_visits + s.non_recreational_visits as visits,
+       LAG(s.recreational_visits + s.non_recreational_visits) OVER (PARTITION BY p.park_code ORDER BY YEAR(s.year)) as prev_year
+   FROM park p
+   JOIN stats s ON p.park_code = s.park_code
+   WHERE YEAR(s.year) >= (SELECT MAX(YEAR(year)) - 1 FROM stats)
 )
 SELECT TOP 10
-    park_name,
-    state,
-    year,
-    visits as current_visits,
-    prev_year as previous_visits,
-    visits - prev_year as visit_change,
-    ROUND(((visits - prev_year) * 100.0) / NULLIF(prev_year, 0), 2) as rise_percent
+   park_name,
+   state,
+   year,
+   visits as current_visits,
+   prev_year as previous_visits,
+   visits - prev_year as visit_change,
+   ROUND(((visits - prev_year) * 100.0) / NULLIF(prev_year, 0), 2) as rise_percent
 FROM RecentRise
 WHERE prev_year IS NOT NULL
-    AND visits > prev_year
-        AND YEAR([year]) = YEAR((SELECT MAX(year) FROM stats))
-ORDER BY rise_percent DESC;
+   AND visits > prev_year
+   AND YEAR(year) = (SELECT MAX(YEAR(year)) FROM stats)
 """,
             },
             {
                 "id": "q7",
                 "title": "State-Level Park Statistics (vw_StateLevelParkStats)",
                 "sql": """
-SELECT 
-    p.state,
-    COUNT(DISTINCT p.park_code) as number_of_parks,
-    ROUND(SUM(s.recreational_visits), 2) as total_state_visits,
-    ROUND(AVG(s.recreational_visits), 2) as avg_visits_per_park,
-    ROUND(SUM(s.recreational_hours), 2) as total_recreational_hours,
-    ROUND(AVG(s.recreational_hours), 2) as avg_hours_per_park,
-    ROUND(SUM(s.recreational_hours) * 1.0 / NULLIF(SUM(s.recreational_visits), 0), 2) as avg_hours_per_visit_state,
-    SUM(s.tent_overnights + s.rv_overnights + s.backcountry_overnights) as total_camping_nights
+SELECT
+   p.state,
+   COUNT(DISTINCT p.park_code) AS number_of_parks,
+   ROUND(SUM(s.recreational_visits + s.non_recreational_visits), 2) AS total_state_visits,
+   ROUND(
+       SUM(s.recreational_visits + s.non_recreational_visits) * 1.0
+       / NULLIF(COUNT(DISTINCT p.park_code), 0),
+       2
+   ) AS avg_visits_per_park,
+   ROUND(SUM(s.recreational_hours + s.non_recreational_hours), 2) AS total_hours,
+   ROUND(
+       SUM(s.recreational_hours + s.non_recreational_hours) * 1.0
+       / NULLIF(COUNT(DISTINCT p.park_code), 0),
+       2
+   ) AS avg_hours_per_park,
+   SUM(
+       s.tent_overnights
+       + s.rv_overnights
+       + s.backcountry_overnights
+		+ s.misc_overnights
+   ) AS total_camping_nights
 FROM park p
 JOIN stats s ON p.park_code = s.park_code
-GROUP BY p.state
+GROUP BY p.state;
 """,
             },
             {
@@ -1163,30 +1211,29 @@ GROUP BY p.state
                 "title": "Falling Stars - Parks Needing Attention (vw_ParksNeedingAttention)",
                 "sql": """
 WITH RecentDecline AS (
-    SELECT 
-        p.park_code,
-        p.name as park_name,
-        p.state,
-        s.year,
-        s.recreational_visits,
-        LAG(s.recreational_visits) OVER (PARTITION BY p.park_code ORDER BY s.year) as prev_year
-    FROM park p
-    JOIN stats s ON p.park_code = s.park_code
-        WHERE s.year >= DATEADD(year, -2, (SELECT MAX(year) FROM stats))
+   SELECT
+       p.park_code,
+       p.name as park_name,
+       p.state,
+       s.year,
+       s.recreational_visits,
+       LAG(s.recreational_visits) OVER (PARTITION BY p.park_code ORDER BY s.year) as prev_year
+   FROM park p
+   JOIN stats s ON p.park_code = s.park_code
+   WHERE YEAR(s.year) >= (SELECT MAX(YEAR(year)) - 1 FROM stats)
 )
 SELECT TOP 10
-    park_name,
-    state,
-    year,
-    recreational_visits as current_visits,
-    prev_year as previous_visits,
-    ABS(recreational_visits - prev_year) as visit_change,
-    ROUND(((recreational_visits - prev_year) * 100.0) / NULLIF(prev_year, 0), 2) as decline_percent
+   park_name,
+   state,
+   year,
+   recreational_visits as current_visits,
+   prev_year as previous_visits,
+   ABS(recreational_visits - prev_year) as visit_change,
+   ROUND(((recreational_visits - prev_year) * 100.0) / NULLIF(prev_year, 0), 2) as decline_percent
 FROM RecentDecline
 WHERE prev_year IS NOT NULL
-    AND recreational_visits < prev_year
-        AND YEAR([year]) = YEAR((SELECT MAX(year) FROM stats))
-ORDER BY decline_percent ASC;
+   AND recreational_visits < prev_year
+   AND YEAR(year) = (SELECT MAX(YEAR(year)) FROM stats)
 """,
             },
         ]
@@ -1211,10 +1258,22 @@ ORDER BY decline_percent ASC;
                             st.error("No DB connection available. Check DB credentials.")
                         else:
                             try:
-                                # Use the editable SQL text when executing
-                                df = run_sql(engine, sql_text)
+                                # Sanitize and possibly limit the SQL to avoid large scans
+                                try:
+                                    safe_sql = sanitize_sql_for_run(sql_text, max_limit=500)
+                                except Exception as se:
+                                    st.error(f"SQL validation failed: {se}")
+                                    safe_sql = None
+
+                                if not safe_sql:
+                                    # validation failed; skip execution
+                                    continue
+
+                                # Execute the sanitized SQL
+                                df = run_sql(engine, safe_sql)
                                 st.caption("Executed SQL:")
-                                st.code(sql_text, language="sql")
+                                # show the actual SQL executed (may differ from editable text if sanitized)
+                                st.code(safe_sql, language="sql")
                                 if df is None or df.empty:
                                     st.info("Query returned no rows.")
                                 else:
