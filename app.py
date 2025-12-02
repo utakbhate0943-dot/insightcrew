@@ -640,6 +640,11 @@ def main():
 
     _render_header("National Parks Intelligence System", header_path)
 
+    # Main page selector (horizontal toggle) placed directly under the header.
+    # This replaces the previous sidebar radio so navigation is visible in the
+    # main content area. Use a horizontal radio to act like toggle buttons.
+    page = st.radio("Page", ["Home", "Dashboards", "Gallery", "Ask"], horizontal=True)
+
     # Sidebar: DB + Tableau + OpenAI config
     st.sidebar.header("Connection & Configuration")
     server, database, username, password, driver = get_db_config()
@@ -705,7 +710,7 @@ def main():
 
     # Sidebar: (removed Tableau Embed and OpenAI quick-status per user request)
 
-    page = st.sidebar.radio("Page", ["Home", "Dashboards", "Gallery", "Ask"])
+    # NOTE: page selector moved to main content below the header (see below)
 
     if page == "Home":
         st.header("Overview")
