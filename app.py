@@ -305,17 +305,6 @@ def get_table_row_count(_engine, table_name):
         return None
 
 
-def infer_latlon_cols(df):
-    # Heuristic to detect latitude/longitude column names in a DataFrame.
-    # Returns (lat_col_name, lon_col_name) or (None, None) if not found.
-    if df.empty:
-        return None, None
-    lat_candidates = [c for c in df.columns if c.lower() in ("latitude", "lat")]
-    lon_candidates = [c for c in df.columns if c.lower() in ("longitude", "lon", "lng", "long")]
-    lat = lat_candidates[0] if lat_candidates else None
-    lon = lon_candidates[0] if lon_candidates else None
-    return lat, lon
-
 
 def render_tableau_embed(url_or_html: str, height: int = 1400):
     # Render a Tableau embed snippet or a direct Tableau URL.
@@ -889,17 +878,6 @@ def main():
                         st.info("No rows available for this table or failed to read.")
                     else:
                         st.dataframe(df)
-                        lat, lon = infer_latlon_cols(df)
-                        if lat and lon:
-                            # normalize and coerce to numeric to avoid map errors
-                            map_df = df.rename(columns={lat: "latitude", lon: "longitude"})[["latitude", "longitude"]].copy()
-                            map_df["latitude"] = pd.to_numeric(map_df["latitude"], errors='coerce')
-                            map_df["longitude"] = pd.to_numeric(map_df["longitude"], errors='coerce')
-                            map_df = map_df.dropna()
-                            if not map_df.empty:
-                                st.map(map_df)
-                            else:
-                                st.info("No valid numeric latitude/longitude values to map for this preview.")
 
                         # Download as CSV
                         csv = df.to_csv(index=False).encode('utf-8')
@@ -946,16 +924,6 @@ def main():
                                 st.info("No rows available for this view or failed to read.")
                             else:
                                 st.dataframe(v_df)
-                                v_lat, v_lon = infer_latlon_cols(v_df)
-                                if v_lat and v_lon:
-                                    v_map_df = v_df.rename(columns={v_lat: "latitude", v_lon: "longitude"})[["latitude", "longitude"]].copy()
-                                    v_map_df["latitude"] = pd.to_numeric(v_map_df["latitude"], errors='coerce')
-                                    v_map_df["longitude"] = pd.to_numeric(v_map_df["longitude"], errors='coerce')
-                                    v_map_df = v_map_df.dropna()
-                                    if not v_map_df.empty:
-                                        st.map(v_map_df)
-                                    else:
-                                        st.info("No valid numeric latitude/longitude values to map for this view preview.")
 
                                 # Download as CSV for view
                                 v_csv = v_df.to_csv(index=False).encode('utf-8')
