@@ -190,6 +190,11 @@ def list_views(_engine):
         sql = "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS"
         df = pd.read_sql(sql, _engine)
         df["full_name"] = df["TABLE_SCHEMA"] + "." + df["TABLE_NAME"]
+        # Hide specific system view that should not be shown
+        try:
+            df = df[df["full_name"].str.lower() != "sys.database_firewall_rules"]
+        except Exception:
+            pass
         return df["full_name"].tolist()
     except Exception:
         return []
@@ -241,6 +246,50 @@ def get_table_schema(_engine, table_name):
         return pd.read_sql(sql, _engine)
     except Exception:
         return pd.DataFrame()
+
+
+def get_object_ddl(_engine, full_name: str) -> str | None:
+    """
+    Attempt to retrieve the DDL/definition for a view or the CREATE TABLE
+    statement for a table. For views (or other programmable objects) we try
+    `OBJECT_DEFINITION(OBJECT_ID('schema.name'))`. If that is not available
+    (e.g. for plain tables), we fall back to constructing a basic CREATE
+    TABLE statement using INFORMATION_SCHEMA metadata.
+    Returns the SQL string or None if not available.
+    """
+    try:
+        if not full_name:
+            return None
+        if '.' in full_name:
+            schema, name = full_name.split('.', 1)
+        else:
+            schema, name = 'dbo', full_name
+
+        # Try to get object definition (works for views, procedures, functions)
+        try:
+            sql = f"SELECT OBJECT_DEFINITION(OBJECT_ID('{schema}.{name}')) AS definition"
+            df = pd.read_sql(sql, _engine)
+            if not df.empty and pd.notna(df.iloc[0, 0]):
+                return df.iloc[0, 0]
+        except Exception:
+            # ignore and fallback to table-create construction
+            pass
+
+        # Fallback: build a simple CREATE TABLE from INFORMATION_SCHEMA
+        cols = get_table_schema(_engine, full_name)
+        if cols is None or cols.empty:
+            return None
+        lines = []
+        for _, r in cols.iterrows():
+            col = r.get('COLUMN_NAME')
+            dt = r.get('DATA_TYPE')
+            if pd.isna(col) or pd.isna(dt):
+                continue
+            lines.append(f"    [{col}] {dt}")
+        ddl = f"CREATE TABLE [{schema}].[{name}] (\n" + ",\n".join(lines) + "\n);"
+        return ddl
+    except Exception:
+        return None
 
 
 @st.cache_data(ttl=300)
@@ -583,7 +632,7 @@ def main():
     <div style="position:absolute;inset:0;background-image:url('data:image/{mime};base64,{b64}');background-size:auto 100%;background-repeat:no-repeat;background-position:right center;filter:brightness(0.55) contrast(1.05);"></div>
     <div style="position:absolute;inset:0;background:linear-gradient(90deg, rgba(6,40,21,0.04) 0%, rgba(255,245,230,0.06) 100%);mix-blend-mode:multiply;"></div>
     <div style="position:absolute;left:36px;top:50%;transform:translateY(-50%);text-align:left;padding:0 24px;">
-        <h1 style="margin:0;color:#000;font-size:64px;line-height:1;font-weight:900;text-shadow:none;font-family:'TW Cen MT Condensed Extra Bold','TW Cen MT Condensed','Arial Black',Arial,sans-serif;">{title_text}</h1>
+        <h1 style="margin:0;color:#000;font-size:36px;line-height:1;font-weight:900;text-shadow:none;font-family:'TW Cen MT Condensed Extra Bold','TW Cen MT Condensed','Arial Black',Arial,sans-serif;">{title_text}</h1>
     </div>
 </div>
 """
@@ -594,7 +643,7 @@ def main():
 
         # fallback plain title (uses requested condensed font if available)
         st.markdown(
-            f"<h1 style=\"margin:0;color:#000;font-size:64px;line-height:1;font-family:'TW Cen MT Condensed Extra Bold','TW Cen MT Condensed','Arial Black',Arial,sans-serif;font-weight:900;\">{title_text}</h1>",
+            f"<h1 style=\"margin:0;color:#000;font-size:36px;line-height:1;font-family:'TW Cen MT Condensed Extra Bold','TW Cen MT Condensed','Arial Black',Arial,sans-serif;font-weight:900;\">{title_text}</h1>",
             unsafe_allow_html=True,
         )
 
@@ -698,16 +747,28 @@ def main():
 
     _render_header("National Parks Intelligence System", header_path)
 
-    # Main page selector (horizontal toggle) placed directly under the header.
-    # This replaces the previous sidebar radio so navigation is visible in the
-    # main content area. Use a horizontal radio to act like toggle buttons.
-    page = st.radio("Page", ["Home", "Dashboards", "Gallery", "Ask"], horizontal=True)
+    # Icon-only page selector placed directly under the header.
+    # We keep internal page identifiers (Home/Dashboards/Gallery/Ask)
+    # but render icon-only buttons so the page names are not visible.
+    if "selected_page" not in st.session_state:
+        st.session_state["selected_page"] = "Home"
+
+    pages = ["Home", "Dashboards", "Gallery", "Ask"]
+    # compact horizontal radio with no visible label (looks like the screenshot)
+    try:
+        current_index = pages.index(st.session_state.get("selected_page", "Home"))
+    except Exception:
+        current_index = 0
+
+    sel = st.radio("", pages, index=current_index, horizontal=True, key="page_radio")
+    # keep a stable alias for other code
+    st.session_state["selected_page"] = sel
+    page = sel
 
     # Sidebar: DB + Tableau + OpenAI config
     st.sidebar.header("Connection & Configuration")
     server, database, username, password, driver = get_db_config()
-    st.sidebar.text("DB Server:")
-    st.sidebar.caption(server or "(not set)")
+    
 
     engine = make_engine(server, database, username, password, driver)
 
@@ -732,11 +793,17 @@ def main():
     # Masked display for diagnostics (do not show password)
     st.sidebar.markdown("**DB credential sources**")
     # Render credential lines using small styled blocks for better contrast
+    # Show actual credential values where available (password kept hidden)
+    display_server = server if server else "(not set)"
+    display_database = database if database else "(not set)"
+    display_username = username if username else "(not set)"
+    display_password = "(hidden)" if password else "(not set)"
+
     creds_html = (
-        f"<div class='db-cred-line'><span class='db-cred-label'>Server:</span> {cred_sources['server']}</div>"
-        f"<div class='db-cred-line'><span class='db-cred-label'>Database:</span> {cred_sources['database']}</div>"
-        f"<div class='db-cred-line'><span class='db-cred-label'>Username:</span> {cred_sources['username']}</div>"
-        f"<div class='db-cred-line'><span class='db-cred-label'>Password:</span> {cred_sources['password']} (hidden)</div>"
+        f"<div class='db-cred-line'><span class='db-cred-label'>Server:</span> {display_server}</div>"
+        f"<div class='db-cred-line'><span class='db-cred-label'>Database:</span> {display_database}</div>"
+        f"<div class='db-cred-line'><span class='db-cred-label'>Username:</span> {display_username}</div>"
+        f"<div class='db-cred-line'><span class='db-cred-label'>Password:</span> {display_password}</div>"
     )
     st.sidebar.markdown(creds_html, unsafe_allow_html=True)
 
@@ -796,6 +863,14 @@ def main():
                         if not schema_df.empty:
                             st.markdown("**Columns (name : type)**")
                             st.write(schema_df.set_index('COLUMN_NAME')['DATA_TYPE'].to_dict())
+                            # Show generated or database DDL for the selected table
+                            try:
+                                ddl = get_object_ddl(engine, selected)
+                                if ddl:
+                                    with st.expander("DDL / Create statement"):
+                                        st.code(ddl, language="sql")
+                            except Exception:
+                                pass
                         else:
                             st.info("Could not retrieve column schema")
                     with col2:
@@ -847,6 +922,14 @@ def main():
                                 if not v_schema_df.empty:
                                     st.markdown("**Columns (name : type)**")
                                     st.write(v_schema_df.set_index('COLUMN_NAME')['DATA_TYPE'].to_dict())
+                                    # Show DDL/definition for the selected view if available
+                                    try:
+                                        v_ddl = get_object_ddl(engine, selected_view)
+                                        if v_ddl:
+                                            with st.expander("DDL / Definition"):
+                                                st.code(v_ddl, language="sql")
+                                    except Exception:
+                                        pass
                                 else:
                                     st.info("Could not retrieve column schema for view")
                             with vcol2:
