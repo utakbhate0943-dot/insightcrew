@@ -1,0 +1,42 @@
+[
+    {
+        "id": "q1",
+        "title": "Year-over-Year Total Visits Growth (Line Chart) (vw_YearOverYearVisits)",
+        "sql": "SELECT\n   year,\n   SUM(recreational_visits) + SUM(non_recreational_visits)  as total_visits,\n   (SUM(recreational_visits) + SUM(non_recreational_visits)) - LAG(SUM(recreational_visits) + SUM(non_recreational_visits)) OVER (ORDER BY year) as visit_change\nFROM stats\nGROUP BY year;"
+    },
+    {
+        "id": "q2",
+        "title": "Right Season to visit the park (vw_BestSeasonToVisit)",
+        "sql": "SELECT\n   p.park_code,\n   p.name as park_name,\n   s.type_of_season as season,\n   s.[Good] as good_months,\n   s.[Limited] as limited_months,\n   s.[closed] as closed_months\nFROM park p\nJOIN seasons s ON p.park_code = s.park_code\nWHERE s.[Good] IS NOT NULL;"
+    },
+    {
+        "id": "q3",
+        "title": "Parks by State Count (Map) (vw_ParksByStateCount)",
+        "sql": "SELECT\n   state,\n   COUNT(*) as number_of_parks\nFROM park\nGROUP BY state;"
+    },
+    {
+        "id": "q4",
+        "title": "Revenue Per Visitor by Fee Structure (vw_RevenuePerVisitor)",
+        "sql": "WITH ParkRevenue AS (\n   SELECT\n       fp.park_code,\n       p.name as park_name,\n       fp.is_entry_free,\n       fp.is_parking_free,\n       AVG(fp.entry_fee) as avg_entry_fee,\n       AVG(fp.pass_cost) as avg_pass_cost,\n       CASE\n           WHEN fp.is_entry_free = 1 THEN 'Free Entry'\n           ELSE 'Paid Entry'\n       END as fee_structure\n   FROM feespasses fp\n   JOIN park p ON fp.park_code = p.park_code\n   GROUP BY fp.park_code, p.name, fp.is_entry_free, fp.is_parking_free\n),\nVisitorStats AS (\n   SELECT\n       park_code,\n       ROUND(AVG(recreational_visits) + AVG(non_recreational_visits), 2) as avg_annual_visits\n   FROM stats\n   GROUP BY park_code\n)\nSELECT\n   pr.park_code,\n   pr.park_name,\n   pr.fee_structure,\n   pr.is_parking_free,\n   ROUND(pr.avg_entry_fee, 2) as avg_entry_fee,\n   pr.avg_pass_cost,\n   vs.avg_annual_visits,\n   CASE\n       WHEN vs.avg_annual_visits > 0\n       THEN ROUND((COALESCE(pr.avg_entry_fee, 0) * vs.avg_annual_visits) / vs.avg_annual_visits, 2)\n       ELSE 0\n   END as estimated_revenue_per_visitor,\n   ROUND(pr.avg_pass_cost / NULLIF(pr.avg_entry_fee, 0), 2) as pass_to_entry_ratio\nFROM ParkRevenue pr\nLEFT JOIN VisitorStats vs ON pr.park_code = vs.park_code;"
+    },
+    {
+        "id": "q5",
+        "title": "Which parks have the best cost-to-capacity ratio for campgrounds (vw_CampgroundCostCapacityAnalysis)",
+        "sql": "SELECT\n   p.name as park_name,\n   p.state,\n   COUNT(DISTINCT c.campgrounds_id) as num_campgrounds,\n   ROUND(AVG(c.cost), 2) as avg_cost,\n   ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights), 0) as avg_camping_nights,\n   ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights) /\n         NULLIF(COUNT(DISTINCT c.campgrounds_id), 0), 0) as nights_per_campground,\n   ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights) /\n         NULLIF(AVG(c.cost), 0), 0) as efficiency_score\nFROM park p\nJOIN campgrounds c ON p.park_code = c.park_code\nJOIN stats s ON p.park_code = s.park_code\n   AND c.cost IS NOT NULL\n   AND c.cost > 0\nGROUP BY p.name, p.state\nHAVING COUNT(DISTINCT c.campgrounds_id) > 0;"
+    },
+    {
+        "id": "q6",
+        "title": "Rising Stars (vw_RisingStarParks)",
+        "sql": "WITH RecentRise AS (\n   SELECT\n       p.park_code,\n       p.name as park_name,\n       p.state,\n       s.year,\n       s.recreational_visits + s.non_recreational_visits as visits,\n       LAG(s.recreational_visits + s.non_recreational_visits) OVER (PARTITION BY p.park_code ORDER BY YEAR(s.year)) as prev_year\n   FROM park p\n   JOIN stats s ON p.park_code = s.park_code\n   WHERE YEAR(s.year) >= (SELECT MAX(YEAR(year)) - 1 FROM stats)\n)\nSELECT TOP 10\n   park_name,\n   state,\n   year,\n   visits as current_visits,\n   prev_year as previous_visits,\n   visits - prev_year as visit_change,\n   ROUND(((visits - prev_year) * 100.0) / NULLIF(prev_year, 0), 2) as rise_percent\nFROM RecentRise\nWHERE prev_year IS NOT NULL\n   AND visits > prev_year\n   AND YEAR(year) = (SELECT MAX(YEAR(year)) FROM stats)"
+    },
+    {
+        "id": "q7",
+        "title": "State-Level Park Statistics (vw_StateLevelParkStats)",
+        "sql": "SELECT\n   p.state,\n   COUNT(DISTINCT p.park_code) AS number_of_parks,\n   ROUND(SUM(s.recreational_visits + s.non_recreational_visits), 2) AS total_state_visits,\n   ROUND(\n       SUM(s.recreational_visits + s.non_recreational_visits) * 1.0\n       / NULLIF(COUNT(DISTINCT p.park_code), 0),\n       2\n   ) AS avg_visits_per_park,\n   ROUND(SUM(s.recreational_hours + s.non_recreational_hours), 2) AS total_hours,\n   ROUND(\n       SUM(s.recreational_hours + s.non_recreational_hours) * 1.0\n       / NULLIF(COUNT(DISTINCT p.park_code), 0),\n       2\n   ) AS avg_hours_per_park,\n   SUM(\n       s.tent_overnights\n       + s.rv_overnights\n       + s.backcountry_overnights\n\t\t+ s.misc_overnights\n   ) AS total_camping_nights\nFROM park p\nJOIN stats s ON p.park_code = s.park_code\nGROUP BY p.state;"
+    },
+    {
+        "id": "q8",
+        "title": "Falling Stars - Parks Needing Attention (vw_ParksNeedingAttention)",
+        "sql": "WITH RecentDecline AS (\n   SELECT\n       p.park_code,\n       p.name as park_name,\n       p.state,\n       s.year,\n       s.recreational_visits,\n       LAG(s.recreational_visits) OVER (PARTITION BY p.park_code ORDER BY s.year) as prev_year\n   FROM park p\n   JOIN stats s ON p.park_code = s.park_code\n   WHERE YEAR(s.year) >= (SELECT MAX(YEAR(year)) - 1 FROM stats)\n)\nSELECT TOP 10\n   park_name,\n   state,\n   year,\n   recreational_visits as current_visits,\n   prev_year as previous_visits,\n   ABS(recreational_visits - prev_year) as visit_change,\n   ROUND(((recreational_visits - prev_year) * 100.0) / NULLIF(prev_year, 0), 2) as decline_percent\nFROM RecentDecline\nWHERE prev_year IS NOT NULL\n   AND recreational_visits < prev_year\n   AND YEAR(year) = (SELECT MAX(YEAR(year)) FROM stats)"
+    }
+]

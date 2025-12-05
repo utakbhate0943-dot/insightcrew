@@ -13,39 +13,18 @@ load_dotenv()
 
 st.set_page_config(page_title="National Parks Intelligence", layout="wide")
 
-# Hardcoded Tableau embed snippet (paste your full embed HTML/JS here)
+# Hardcoded Tableau embed snippet
 TABLEAU_EMBED_HTML = """
 <div class='tableauPlaceholder' id='viz1764637863337' style='position: relative'><noscript><a href='#'><img alt=' ' src='https:&#47;&#47;public.tableau.com&#47;static&#47;images&#47;US&#47;USNationalParksDashboard_17642532718610&#47;ExplorerGuide&#47;1_rss.png' style='border: none' /></a></noscript><object class='tableauViz'  style='display:none;'><param name='host_url' value='https%3A%2F%2Fpublic.tableau.com%2F' /> <param name='embed_code_version' value='3' /> <param name='site_root' value='' /><param name='name' value='USNationalParksDashboard_17642532718610&#47;ExplorerGuide' /><param name='tabs' value='yes' /><param name='toolbar' value='yes' /><param name='static_image' value='https:&#47;&#47;public.tableau.com&#47;static&#47;images&#47;US&#47;USNationalParksDashboard_17642532718610&#47;ExplorerGuide&#47;1.png' /> <param name='animate_transition' value='yes' /><param name='display_static_image' value='yes' /><param name='display_spinner' value='yes' /><param name='display_overlay' value='yes' /><param name='display_count' value='yes' /><param name='language' value='en-US' /></object></div>                <script type='text/javascript'>                    var divElement = document.getElementById('viz1764637863337');                    var vizElement = divElement.getElementsByTagName('object')[0];                    if ( divElement.offsetWidth > 800 ) { vizElement.style.width='900px';vizElement.style.height='1250px';} else if ( divElement.offsetWidth > 500 ) { vizElement.style.width='900px';vizElement.style.height='1250px';} else { vizElement.style.width='100%';vizElement.style.height='2450px';}                     var scriptElement = document.createElement('script');                    scriptElement.src = 'https://public.tableau.com/javascripts/api/viz_v1.js';                    vizElement.parentNode.insertBefore(scriptElement, vizElement);                </script>
 """
 
-# ---------------------------------------------------------------------------
-# Module: app.py
-# Purpose: Streamlit web app for exploring a National Parks database and
-#          embedding Tableau dashboards. Key features:
-#   - Connect to an MSSQL database using credentials from env/.env or
-#     Streamlit secrets.
-#   - List and preview tables and views (schema, row count, sample rows).
-#   - Simple NLP-to-SQL helper (uses OpenAI if configured) and several
-#     pre-built analytical SQL snippets with sample visualizations.
-#   - Embed a Tableau dashboard via raw HTML/iframe.
-#
-# High-level section layout:
-#   1) DB connection helpers and engine creation
-#   2) Convenience cached functions for listing/reading tables/views
-#   3) Helper utilities (schema inference, tableau embed rendering)
-#   4) Main Streamlit UI: Header, Sidebar (DB creds/status), Pages
-#      - Home: table/view preview
-#      - Dashboards: embedded Tableau
-#      - Ask: analytical SQL snippets + run/visualize
-# ---------------------------------------------------------------------------
-
-
 def get_db_config():
-    # DB credential resolution
-    # Prefer environment variables (or .env via load_dotenv()),
-    # but fall back to Streamlit secrets when available (deployed on Streamlit Cloud).
-    # Returns: (server, database, username, password, driver)
-    def _get(key, default=None):
+    """Resolve DB credentials from environment variables or Streamlit secrets.
+
+    Returns:
+        tuple: (server, database, username, password, driver)
+    """
+    def _get(key: str, default=None):
         v = os.getenv(key)
         if v:
             return v
@@ -61,39 +40,32 @@ def get_db_config():
     driver = _get("DB_DRIVER", "ODBC Driver 17 for SQL Server")
     return server, database, username, password, driver
 
-
 @st.cache_resource
 def make_engine(server, database, username, password, driver):
-    # Build a SQLAlchemy engine using pyodbc by default.
-    # The function attempts multiple fallbacks to handle common environment issues:
-    #  - try a strict encrypted pyodbc connection
-    #  - retry trusting the server certificate
-    #  - try with Encrypt=no
-    #  - fallback to pymssql if pyodbc/ODBC driver is not available
+    
     if not (server and database and username and password):
         return None
-    # First try using pyodbc (requires system ODBC driver e.g. msodbcsql17/18)
+    
     conn_str = (
         f"DRIVER={{{driver}}};SERVER={server};DATABASE={database};UID={username};PWD={password};"
         "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
     )
     quoted = urllib.parse.quote_plus(conn_str)
 
-    # Create a pyodbc engine and test a lightweight connection immediately.
+    
     engine = sqlalchemy.create_engine(f"mssql+pyodbc:///?odbc_connect={quoted}")
     try:
         with engine.connect() as conn:
             conn.execute(sqlalchemy.text("SELECT 1"))
         return engine
     except Exception as e:
-        # Save last error for UI diagnostics
         last_err = str(e)
         try:
             st.session_state['db_connect_error'] = last_err
         except Exception:
             pass
 
-        # Try a safer pyodbc connection that trusts the server certificate (common TLS issues)
+        
         try:
             alt_conn_str = (
                 f"DRIVER={{{driver}}};SERVER={server};DATABASE={database};UID={username};PWD={password};"
@@ -105,7 +77,7 @@ def make_engine(server, database, username, password, driver):
                 conn_alt.execute(sqlalchemy.text("SELECT 1"))
             return engine_alt
         except Exception:
-            # try a less strict encryption setting as a fallback
+                
             try:
                 alt_conn_str2 = (
                     f"DRIVER={{{driver}}};SERVER={server};DATABASE={database};UID={username};PWD={password};"
@@ -117,7 +89,7 @@ def make_engine(server, database, username, password, driver):
                     conn_alt2.execute(sqlalchemy.text("SELECT 1"))
                 return engine_alt2
             except Exception:
-                # If the failure looks like a missing ODBC driver or connection-level failure, try pymssql fallback
+                
                 msg = last_err.lower()
                 try:
                     import pymssql  # type: ignore
@@ -133,7 +105,7 @@ def make_engine(server, database, username, password, driver):
                     engine2 = sqlalchemy.create_engine(
                         f"mssql+pymssql://{username}:{urllib.parse.quote_plus(password)}@{host}:{port}/{database}"
                     )
-                    # test pymssql connection
+                    
                     with engine2.connect() as conn2:
                         conn2.execute(sqlalchemy.text("SELECT 1"))
                     try:
@@ -142,7 +114,7 @@ def make_engine(server, database, username, password, driver):
                         pass
                     return engine2
                 except Exception:
-                    # Final fallback: return None and keep last error in session_state for UI display
+                    
                     try:
                         st.session_state['db_connect_error'] = last_err
                     except Exception:
@@ -163,17 +135,17 @@ def test_db_connection(engine):
         return False, "No engine (missing credentials)"
     try:
         with engine.connect() as conn:
-            # lightweight check
+    
             conn.execute(sqlalchemy.text("SELECT 1"))
         return True, None
     except Exception as e:
-        # return stringified error for diagnostics (do not include full connection string)
+        
         return False, str(e)
 
 
 @st.cache_data(ttl=60)
 def list_tables(_engine):
-    # Return a list of fully-qualified table names (schema.table)
+    
     try:
         sql = "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE='BASE TABLE'"
         df = pd.read_sql(sql, _engine)
@@ -185,12 +157,12 @@ def list_tables(_engine):
 
 @st.cache_data(ttl=60)
 def list_views(_engine):
-    # Return a list of fully-qualified view names (schema.view)
+    
     try:
         sql = "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS"
         df = pd.read_sql(sql, _engine)
         df["full_name"] = df["TABLE_SCHEMA"] + "." + df["TABLE_NAME"]
-        # Hide specific system view that should not be shown
+        
         try:
             df = df[df["full_name"].str.lower() != "sys.database_firewall_rules"]
         except Exception:
@@ -202,15 +174,13 @@ def list_views(_engine):
 
 @st.cache_data(ttl=30)
 def read_table(_engine, table_name, limit=500, where=None):
-    # Read a limited number of rows from a table or view. This helper is
-    # intentionally conservative: it always applies a TOP(limit) to avoid
-    # accidental large table scans in the UI.
+    
     try:
         where_clause = f" WHERE {where}" if where and where.strip() else ""
         query = f"SELECT TOP ({limit}) * FROM {table_name}{where_clause}"
         return pd.read_sql(query, _engine)
     except Exception as e:
-        # Do not crash the app; return empty df and surface the error where called
+        
         return pd.DataFrame()
 
 
@@ -219,19 +189,12 @@ def _reset_sql_in_session(key, value):
     try:
         st.session_state[key] = value
     except Exception:
-        # best-effort; Streamlit will show errors elsewhere if this fails
+        
         pass
-
-    # Note: this helper is intentionally tiny and defensive because it's used
-    # as a callback for Streamlit buttons. It updates session_state so that
-    # the editable SQL textareas can be reset to their original snippets.
-
 
 @st.cache_data(ttl=300)
 def get_table_schema(_engine, table_name):
-    # Return column names and data types for a table or view using
-    # INFORMATION_SCHEMA.COLUMNS. The function accepts fully-qualified
-    # names (schema.table) or a simple table name (defaults to dbo).
+    
     try:
         if '.' in table_name:
             schema, tbl = table_name.split('.', 1)
@@ -246,7 +209,6 @@ def get_table_schema(_engine, table_name):
         return pd.read_sql(sql, _engine)
     except Exception:
         return pd.DataFrame()
-
 
 def get_object_ddl(_engine, full_name: str) -> str | None:
     """
@@ -265,17 +227,17 @@ def get_object_ddl(_engine, full_name: str) -> str | None:
         else:
             schema, name = 'dbo', full_name
 
-        # Try to get object definition (works for views, procedures, functions)
+        
         try:
             sql = f"SELECT OBJECT_DEFINITION(OBJECT_ID('{schema}.{name}')) AS definition"
             df = pd.read_sql(sql, _engine)
             if not df.empty and pd.notna(df.iloc[0, 0]):
                 return df.iloc[0, 0]
         except Exception:
-            # ignore and fallback to table-create construction
+            
             pass
 
-        # Fallback: build a simple CREATE TABLE from INFORMATION_SCHEMA
+        
         cols = get_table_schema(_engine, full_name)
         if cols is None or cols.empty:
             return None
@@ -294,9 +256,7 @@ def get_object_ddl(_engine, full_name: str) -> str | None:
 
 @st.cache_data(ttl=300)
 def get_table_row_count(_engine, table_name):
-    # Return the total row count for a table or view. Note: this can be
-    # expensive on very large objects; we use it here for a diagnostic
-    # display in the UI (row count shown to the user).
+    
     try:
         sql = f"SELECT COUNT(*) as cnt FROM {table_name}"
         df = pd.read_sql(sql, _engine)
@@ -308,16 +268,11 @@ def get_table_row_count(_engine, table_name):
 
 def render_tableau_embed(url_or_html: str, height: int = 1400):
     # Render a Tableau embed snippet or a direct Tableau URL.
-    # - If the provided string looks like full embed HTML (starts with '<'),
-    #   attempt to rewrite any hard-coded pixel widths set by the embed script
-    #   so the viz uses `width:100%` and therefore matches the Streamlit container.
-    # - Otherwise build a simple responsive iframe for the provided URL.
     if not url_or_html:
         st.info("No Tableau URL provided.")
         return
 
     trimmed = url_or_html.strip()
-    # If raw embed HTML, try to neutralize fixed-width assignments so the viz becomes responsive
     if trimmed.startswith("<"):
         try:
             import re
@@ -344,100 +299,8 @@ def render_tableau_embed(url_or_html: str, height: int = 1400):
     iframe = f'<div style="width:100%"><iframe src="{url_or_html}" style="width:100%;height:100%;border:0;" loading="lazy"></iframe></div>'
     components.html(iframe, height=height, scrolling=True)
 
-
-def nlp_to_sql_openai(prompt_text, engine, max_tokens=256, model="gpt-4o-mini"):
-    # NLP -> SQL using OpenAI (optional)
-    # This helper asks OpenAI to translate a natural language prompt into a
-    # single T-SQL SELECT statement. It attempts to use the newer OpenAI
-    # client API if available; otherwise it falls back to the legacy
-    # openai.ChatCompletion interface. The function enforces several safety
-    # checks (only SELECT, limits via TOP) to avoid destructive or expensive
-    # generated SQL.
-    # NOTE: This requires an OPENAI_API_KEY in your environment to work.
-    schema_hint = "\n".join(list_tables(engine)[:10]) if engine is not None else "(schema not available)"
-
-    system_prompt = (
-        "You are a helpful assistant that translates natural language questions into SQL SELECT queries. "
-        "Only return a single syntactically valid T-SQL SELECT statement. Do NOT return any non-SELECT statements (no INSERT/UPDATE/DELETE/DROP/etc). "
-        "If the question is ambiguous, ask follow-up for clarification. Always constrain results (use TOP) to avoid very large scans. "
-        "Use the following available tables (examples):\n" + schema_hint
-    )
-
-    sql = None
-    # Try new client API first
-    try:
-        from openai import OpenAI
-        client = OpenAI()
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt_text},
-            ],
-            max_tokens=max_tokens,
-            temperature=0,
-        )
-        # response structure may vary; try common access patterns
-        try:
-            sql = resp.choices[0].message.content.strip()
-        except Exception:
-            try:
-                sql = resp.choices[0]["message"]["content"].strip()
-            except Exception:
-                sql = getattr(resp.choices[0], 'text', None)
-                if sql:
-                    sql = sql.strip()
-    except Exception:
-        # Fall back to older openai package interface
-        try:
-            import openai
-            openai.api_key = os.getenv("OPENAI_API_KEY")
-            if openai.api_key is None:
-                raise RuntimeError("OPENAI_API_KEY not set in environment")
-            resp = openai.ChatCompletion.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt_text},
-                ],
-                max_tokens=max_tokens,
-                temperature=0,
-            )
-            try:
-                sql = resp.choices[0].message.content.strip()
-            except Exception:
-                sql = getattr(resp.choices[0], 'text', None)
-                if sql:
-                    sql = sql.strip()
-        except Exception as e:
-            raise RuntimeError(
-                "OpenAI request failed. Either set OPENAI_API_KEY or install a compatible openai package (e.g. openai>=1.0.0), or pin to openai==0.28 if you prefer the old API. "
-                f"Inner error: {e}"
-            )
-
-    if not sql:
-        raise RuntimeError("No SQL returned from OpenAI model")
-    # Simple safety: disallow suspicious keywords
-    lowered = sql.lower()
-    forbidden = ["insert ", "update ", "delete ", "drop ", "alter ", "create ", "truncate ", "exec ", "sp_"]
-    if any(k in lowered for k in forbidden):
-        raise RuntimeError("Generated SQL contains forbidden statements")
-
-    # Ensure SELECT
-    if not lowered.startswith("select"):
-        raise RuntimeError("Generated SQL does not start with SELECT")
-
-    # Ensure TOP exists to limit result size
-    if "top" not in lowered:
-        # naive: add TOP 500
-        sql = sql.replace("select", "SELECT TOP (500)", 1)
-
-    return sql
-
-
 def run_sql(engine, sql):
     # Execute a SQL query and return a pandas DataFrame. Exceptions are
-    # propagated to the caller so the UI can display a helpful error message.
     try:
         df = pd.read_sql(sql, engine)
         return df
@@ -494,8 +357,7 @@ def render_sample_viz(qid: str, df: pd.DataFrame):
         return
     try:
         # This function contains hard-coded small visualizations keyed by
-        # question id (qid). The visuals are intentionally simple and
-        # use only Streamlit's built-in charts so the app remains lightweight.
+        # question id (qid). The visuals are intentionally simple and use only Streamlit's built-in charts so the app remains lightweight.
         # Q1: Year-over-Year total visits
         if qid == "q1" and "year" in df.columns:
             d = df.copy()
@@ -504,14 +366,14 @@ def render_sample_viz(qid: str, df: pd.DataFrame):
                 d = d.dropna(subset=["year"]).sort_values("year")
                 if not d.empty:
                     st.subheader("Year-over-Year total visits")
-                    st.line_chart(d.set_index("year")["total_visits"])
+                    st.line_chart(d.set_index("year")["total_visits"], use_container_width=True)
                     return
 
         # Q2: Best season — counts per season
         if qid == "q2" and "season" in df.columns:
             st.subheader("Parks by Season (sample)")
             counts = df["season"].value_counts().rename_axis("season").reset_index(name="count")
-            st.bar_chart(counts.set_index("season")["count"])  # simple bar
+            st.bar_chart(counts.set_index("season")["count"], use_container_width=True)
             return
 
         # Q3: Parks by state count
@@ -519,7 +381,7 @@ def render_sample_viz(qid: str, df: pd.DataFrame):
             st.subheader("Parks by state (top 20)")
             key = "number_of_parks" if "number_of_parks" in df.columns else "count"
             top = df[["state", key]].groupby("state").sum().sort_values(key, ascending=False).head(20)
-            st.bar_chart(top[key])
+            st.bar_chart(top[key], use_container_width=True)
             return
 
         # Q4: Revenue per visitor
@@ -527,7 +389,7 @@ def render_sample_viz(qid: str, df: pd.DataFrame):
             st.subheader("Estimated revenue per visitor (sample)")
             sample = df[["park_name", "estimated_revenue_per_visitor"]].dropna()
             sample = sample.sort_values("estimated_revenue_per_visitor", ascending=False).head(15)
-            st.bar_chart(sample.set_index("park_name")["estimated_revenue_per_visitor"]) 
+            st.bar_chart(sample.set_index("park_name")["estimated_revenue_per_visitor"], use_container_width=True)
             return
 
         # Q5: Campground cost vs avg camping nights (scatter via Vega-Lite)
@@ -548,14 +410,14 @@ def render_sample_viz(qid: str, df: pd.DataFrame):
         if qid == "q6" and "rise_percent" in df.columns:
             st.subheader("Top rising parks")
             sample = df[["park_name", "rise_percent"]].dropna().sort_values("rise_percent", ascending=False).head(15)
-            st.bar_chart(sample.set_index("park_name")["rise_percent"]) 
+            st.bar_chart(sample.set_index("park_name")["rise_percent"], use_container_width=True)
             return
 
         # Q7: State-level stats
         if qid == "q7" and "state" in df.columns and "total_state_visits" in df.columns:
             st.subheader("State total visits (sample)")
             top = df[["state", "total_state_visits"]].groupby("state").sum().sort_values("total_state_visits", ascending=False).head(20)
-            st.bar_chart(top["total_state_visits"]) 
+            st.bar_chart(top["total_state_visits"], use_container_width=True) 
             return
 
         # Q8: Falling stars
@@ -563,7 +425,7 @@ def render_sample_viz(qid: str, df: pd.DataFrame):
             st.subheader("Parks needing attention")
             key = "decline_percent" if "decline_percent" in df.columns else "visit_change"
             sample = df[["park_name", key]].dropna().sort_values(key).head(15)
-            st.bar_chart(sample.set_index("park_name")[key])
+            st.bar_chart(sample.set_index("park_name")[key], use_container_width=True)
             return
 
     except Exception:
@@ -572,16 +434,6 @@ def render_sample_viz(qid: str, df: pd.DataFrame):
 
 
 def main():
-    # Main Streamlit app
-    # This function builds the entire UI. High-level flow:
-    #  - Render header (optional image from ./assets/)
-    #  - Inject CSS theme for the app
-    #  - Sidebar: display DB credential sources and connection status
-    #  - Page selector with three pages: Home, Dashboards, Ask
-    #      * Home: preview tables and views with schema/count/download
-    #      * Dashboards: embed Tableau HTML/iframe
-    #      * Ask: pre-written analytical SQL snippets (editable) + Run
-    # No uploader UI: we will look for an image file in ./assets/ and use the first match.
     assets_dir = Path("assets")
     assets_dir.mkdir(exist_ok=True)
 
@@ -735,10 +587,7 @@ def main():
         )
 
     _render_header("National Parks Intelligence System", header_path)
-
-    # Icon-only page selector placed directly under the header.
-    # We keep internal page identifiers (Home/Dashboards/Gallery/Ask)
-    # but render icon-only buttons so the page names are not visible.
+    # Icon-only page selector placed directly under the header.We keep internal page identifiers (Home/Dashboards/Gallery/Ask)
     if "selected_page" not in st.session_state:
         st.session_state["selected_page"] = "Home"
 
@@ -755,13 +604,10 @@ def main():
     st.session_state["selected_page"] = sel
     page = sel
 
-    # Sidebar: DB + Tableau + OpenAI config
+    # Sidebar: DB config
     st.sidebar.header("Connection & Configuration")
     server, database, username, password, driver = get_db_config()
-    
-
     engine = make_engine(server, database, username, password, driver)
-
     # Diagnostic: show where credentials are coming from (env / secrets / missing)
     def _source_of(key):
         if os.getenv(key):
@@ -823,9 +669,7 @@ def main():
     elif ok:
         st.sidebar.markdown("<div class='db-badge db-badge-success'>DB Connection: OK</div>", unsafe_allow_html=True)
 
-    # Sidebar: (removed Tableau Embed and OpenAI quick-status per user request)
-
-    # NOTE: page selector moved to main content below the header (see below)
+    
 
     if page == "Home":
         st.header("Overview")
@@ -976,74 +820,54 @@ def main():
             st.error(f"Failed to render embedded dashboard: {e}")
 
     elif page == "Gallery":
-        # Simplified Gallery: automatically show images and titles (full name, state)
-        # without asking the user to choose table/column names. This assumes a
-        # park-like table exists (e.g. dbo.park) with columns such as
-        # 'fullname'/'name' and 'state' and an image column like 'images'.
         st.header("Gallery — Parks")
-        st.markdown("Images with title (full name, state) — no selection required.")
+        st.markdown("Images with title (full name, state) — sourced from the `park` table.")
 
         if engine is None:
             st.warning("Database not connected. Provide credentials in environment or .env.")
         else:
+            # Simplified: only use the park table for gallery content. Prefer fully-qualified 'dbo.park',
+            # then a plain 'park' table, or any table that ends with '.park'. Do NOT scan arbitrary tables.
             tables = list_tables(engine)
-            if not tables:
-                st.info("No tables found to build a gallery.")
-            else:
-                # choose a park-like table automatically (prefer dbo.park)
-                chosen_table = None
-                lowercase_tables = [t.lower() for t in tables]
-                if "dbo.park" in lowercase_tables:
-                    chosen_table = tables[lowercase_tables.index("dbo.park")]
+            chosen_table = None
+            if tables:
+                lower = [t.lower() for t in tables]
+                if "dbo.park" in lower:
+                    chosen_table = tables[lower.index("dbo.park")]
+                elif "park" in lower:
+                    chosen_table = tables[lower.index("park")]
                 else:
-                    # prefer any table that ends with '.park' or contains 'park'
+                    # last resort: any table that ends with '.park'
                     for t in tables:
-                        if t.lower().endswith('.park') or '.park' in t.lower() or t.lower().endswith('park'):
+                        if t.lower().endswith('.park'):
                             chosen_table = t
                             break
-                if not chosen_table:
-                    # fallback to first table
-                    chosen_table = tables[0]
 
-                # sensible defaults for columns
-                schema = get_table_schema(engine, chosen_table)
-                cols = list(schema['COLUMN_NAME']) if not schema.empty else []
-
-                # find label (fullname/name) and state columns
-                def find_ci(names, available):
-                    for n in names:
-                        for a in available:
-                            if a.lower() == n.lower():
-                                return a
-                    return None
-
-                label_col = find_ci(["fullname", "full_name", "name", "park_name"], cols) or (cols[0] if cols else None)
-                state_col = find_ci(["state", "st", "region"], cols) or None
-                img_col = find_ci(["images", "image", "img", "photo", "picture", "thumbnail", "thumb", "url", "logo"], cols) or None
-
+            if not chosen_table:
+                st.info("No `park` table found. Gallery requires a table named `park` or `dbo.park`.")
+            else:
                 limit = st.number_input("Limit items", min_value=6, max_value=1000, value=60, step=6, key="gallery_limit")
-
+                # Read a lightweight preview (only rows) and then resolve simple columns from returned DataFrame
                 preview_df = read_table(engine, chosen_table, limit=int(limit), where=None)
                 if preview_df is None or preview_df.empty:
-                    st.info("No rows available for the gallery or failed to read.")
+                    st.info("No rows available in the park table or failed to read.")
                 else:
                     available_cols = preview_df.columns.tolist()
-                    # resolve actual column names (case-insensitive)
-                    def resolve(col):
-                        if not col:
-                            return None
-                        for a in available_cols:
-                            if a.lower() == col.lower():
-                                return a
+
+                    # Resolve common column names (simple, case-insensitive)
+                    def resolve(col_candidates):
+                        for cand in col_candidates:
+                            for a in available_cols:
+                                if a.lower() == cand.lower():
+                                    return a
                         return None
 
-                    label_actual = resolve(label_col) or (available_cols[0] if available_cols else None)
-                    state_actual = resolve(state_col)
-                    img_actual = resolve(img_col) or (next((c for c in available_cols if any(k in c.lower() for k in ("image","img","photo","picture","thumb","url","logo","images"))), None))
+                    label_actual = resolve(["fullname", "full_name", "name", "park_name"]) or (available_cols[0] if available_cols else None)
+                    state_actual = resolve(["state", "st", "region"]) or None
+                    img_actual = resolve(["images", "image", "img", "photo", "picture", "thumbnail", "thumb", "url", "logo"]) or None
 
                     st.markdown(f"**Gallery source:** `{chosen_table}` — showing up to {limit} items")
 
-                    # Build list of records with label and image
                     records = []
                     for _, r in preview_df.iterrows():
                         title_parts = []
@@ -1053,12 +877,12 @@ def main():
                             title_parts.append(str(r.get(state_actual)))
                         title = ", ".join(title_parts) if title_parts else ""
                         img_val = r.get(img_actual) if img_actual in preview_df.columns else None
-                        if pd.isna(img_val):
+                        if img_val is None or (isinstance(img_val, float) and pd.isna(img_val)):
                             continue
                         records.append({"title": title, "img": img_val})
 
                     if not records:
-                        st.info("No image data found in the detected image column for gallery.")
+                        st.info("No image data found in the park table.")
                     else:
                         per_row = 3
                         num = len(records)
@@ -1099,7 +923,6 @@ def main():
         st.markdown(
             "This page lists 8 analytical questions with SQL snippet hints. "
             "Click an item to view the SQL and press `Run SQL` to execute it against the connected database. "
-            "(This replaces the previous chatbot-style NLP UI.)"
         )
 
         max_rows = st.number_input("Max rows to display", min_value=10, max_value=2000, value=200)
@@ -1107,206 +930,34 @@ def main():
         if engine is None:
             st.warning("Database not connected. Provide credentials in environment or .env.")
 
-        # Analytical questions and SQL snippet hints provided by user
-        questions = [
-            {
-                "id": "q1",
-                "title": "Year-over-Year Total Visits Growth (Line Chart) (vw_YearOverYearVisits)",
-                "sql": """
-SELECT
-   year,
-   SUM(recreational_visits) + SUM(non_recreational_visits)  as total_visits,
-   (SUM(recreational_visits) + SUM(non_recreational_visits)) - LAG(SUM(recreational_visits) + SUM(non_recreational_visits)) OVER (ORDER BY year) as visit_change
-FROM stats
-GROUP BY year;
-""",
-            },
-            {
-                "id": "q2",
-                "title": "Right Season to visit the park (vw_BestSeasonToVisit)",
-                "sql": """
-SELECT
-   p.park_code,
-   p.name as park_name,
-   s.type_of_season as season,
-   s.[Good] as good_months,
-   s.[Limited] as limited_months,
-   s.[closed] as closed_months
-FROM park p
-JOIN seasons s ON p.park_code = s.park_code
-WHERE s.[Good] IS NOT NULL;
-""",
-            },
-            {
-                "id": "q3",
-                "title": "Parks by State Count (Map) (vw_ParksByStateCount)",
-                "sql": """
-SELECT
-   state,
-   COUNT(*) as number_of_parks
-FROM park
-GROUP BY state;
-""",
-            },
-            {
-                "id": "q4",
-                "title": "Revenue Per Visitor by Fee Structure (vw_RevenuePerVisitor)",
-                "sql": """
-WITH ParkRevenue AS (
-   SELECT
-       fp.park_code,
-       p.name as park_name,
-       fp.is_entry_free,
-       fp.is_parking_free,
-       AVG(fp.entry_fee) as avg_entry_fee,
-       AVG(fp.pass_cost) as avg_pass_cost,
-       CASE
-           WHEN fp.is_entry_free = 1 THEN 'Free Entry'
-           ELSE 'Paid Entry'
-       END as fee_structure
-   FROM feespasses fp
-   JOIN park p ON fp.park_code = p.park_code
-   GROUP BY fp.park_code, p.name, fp.is_entry_free, fp.is_parking_free
-),
-VisitorStats AS (
-   SELECT
-       park_code,
-       ROUND(AVG(recreational_visits) + AVG(non_recreational_visits), 2) as avg_annual_visits
-   FROM stats
-   GROUP BY park_code
-)
-SELECT
-   pr.park_code,
-   pr.park_name,
-   pr.fee_structure,
-   pr.is_parking_free,
-   ROUND(pr.avg_entry_fee, 2) as avg_entry_fee,
-   pr.avg_pass_cost,
-   vs.avg_annual_visits,
-   CASE
-       WHEN vs.avg_annual_visits > 0
-       THEN ROUND((COALESCE(pr.avg_entry_fee, 0) * vs.avg_annual_visits) / vs.avg_annual_visits, 2)
-       ELSE 0
-   END as estimated_revenue_per_visitor,
-   ROUND(pr.avg_pass_cost / NULLIF(pr.avg_entry_fee, 0), 2) as pass_to_entry_ratio
-FROM ParkRevenue pr
-LEFT JOIN VisitorStats vs ON pr.park_code = vs.park_code;
-""",
-            },
-            {
-                "id": "q5",
-                "title": "Which parks have the best cost-to-capacity ratio for campgrounds (vw_CampgroundCostCapacityAnalysis)",
-                "sql": """
-SELECT
-   p.name as park_name,
-   p.state,
-   COUNT(DISTINCT c.campgrounds_id) as num_campgrounds,
-   ROUND(AVG(c.cost), 2) as avg_cost,
-   ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights), 0) as avg_camping_nights,
-   ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights) /
-         NULLIF(COUNT(DISTINCT c.campgrounds_id), 0), 0) as nights_per_campground,
-   ROUND(AVG(s.concessioner_camping + s.tent_overnights + s.rv_overnights) /
-         NULLIF(AVG(c.cost), 0), 0) as efficiency_score
-FROM park p
-JOIN campgrounds c ON p.park_code = c.park_code
-JOIN stats s ON p.park_code = s.park_code
-   AND c.cost IS NOT NULL
-   AND c.cost > 0
-GROUP BY p.name, p.state
-HAVING COUNT(DISTINCT c.campgrounds_id) > 0;
-""",
-            },
-            {
-                "id": "q6",
-                "title": "Rising Stars (vw_RisingStarParks)",
-                "sql": """
-WITH RecentRise AS (
-   SELECT
-       p.park_code,
-       p.name as park_name,
-       p.state,
-       s.year,
-       s.recreational_visits + s.non_recreational_visits as visits,
-       LAG(s.recreational_visits + s.non_recreational_visits) OVER (PARTITION BY p.park_code ORDER BY YEAR(s.year)) as prev_year
-   FROM park p
-   JOIN stats s ON p.park_code = s.park_code
-   WHERE YEAR(s.year) >= (SELECT MAX(YEAR(year)) - 1 FROM stats)
-)
-SELECT TOP 10
-   park_name,
-   state,
-   year,
-   visits as current_visits,
-   prev_year as previous_visits,
-   visits - prev_year as visit_change,
-   ROUND(((visits - prev_year) * 100.0) / NULLIF(prev_year, 0), 2) as rise_percent
-FROM RecentRise
-WHERE prev_year IS NOT NULL
-   AND visits > prev_year
-   AND YEAR(year) = (SELECT MAX(YEAR(year)) FROM stats)
-""",
-            },
-            {
-                "id": "q7",
-                "title": "State-Level Park Statistics (vw_StateLevelParkStats)",
-                "sql": """
-SELECT
-   p.state,
-   COUNT(DISTINCT p.park_code) AS number_of_parks,
-   ROUND(SUM(s.recreational_visits + s.non_recreational_visits), 2) AS total_state_visits,
-   ROUND(
-       SUM(s.recreational_visits + s.non_recreational_visits) * 1.0
-       / NULLIF(COUNT(DISTINCT p.park_code), 0),
-       2
-   ) AS avg_visits_per_park,
-   ROUND(SUM(s.recreational_hours + s.non_recreational_hours), 2) AS total_hours,
-   ROUND(
-       SUM(s.recreational_hours + s.non_recreational_hours) * 1.0
-       / NULLIF(COUNT(DISTINCT p.park_code), 0),
-       2
-   ) AS avg_hours_per_park,
-   SUM(
-       s.tent_overnights
-       + s.rv_overnights
-       + s.backcountry_overnights
-		+ s.misc_overnights
-   ) AS total_camping_nights
-FROM park p
-JOIN stats s ON p.park_code = s.park_code
-GROUP BY p.state;
-""",
-            },
-            {
-                "id": "q8",
-                "title": "Falling Stars - Parks Needing Attention (vw_ParksNeedingAttention)",
-                "sql": """
-WITH RecentDecline AS (
-   SELECT
-       p.park_code,
-       p.name as park_name,
-       p.state,
-       s.year,
-       s.recreational_visits,
-       LAG(s.recreational_visits) OVER (PARTITION BY p.park_code ORDER BY s.year) as prev_year
-   FROM park p
-   JOIN stats s ON p.park_code = s.park_code
-   WHERE YEAR(s.year) >= (SELECT MAX(YEAR(year)) - 1 FROM stats)
-)
-SELECT TOP 10
-   park_name,
-   state,
-   year,
-   recreational_visits as current_visits,
-   prev_year as previous_visits,
-   ABS(recreational_visits - prev_year) as visit_change,
-   ROUND(((recreational_visits - prev_year) * 100.0) / NULLIF(prev_year, 0), 2) as decline_percent
-FROM RecentDecline
-WHERE prev_year IS NOT NULL
-   AND recreational_visits < prev_year
-   AND YEAR(year) = (SELECT MAX(YEAR(year)) FROM stats)
-""",
-            },
-        ]
+        # Load analytical questions from a JSON file if present, else try questions.py
+        questions = []
+        try:
+            import json
+            qpath = Path(__file__).parent / "questions.json"
+            if qpath.exists():
+                with open(qpath, "r", encoding="utf-8") as _f:
+                    loaded = json.load(_f)
+                    if isinstance(loaded, list):
+                        questions = loaded
+                    else:
+                        st.warning("questions.json found but does not contain a list. No prebuilt questions loaded.")
+            else:
+                # Fallback: try legacy Python module if JSON not present
+                try:
+                    from questions import QUESTIONS as _q
+                    if isinstance(_q, list):
+                        questions = _q
+                except Exception:
+                    # no JSON and no questions.py — leave questions empty and show a notice below when rendering
+                    questions = []
+        except Exception as _e:
+            # If anything went wrong loading/parsing, fall back to empty list and show a short warning
+            try:
+                st.warning(f"Failed to load questions.json: {_e}")
+            except Exception:
+                pass
+            questions = []
 
         # Index hint removed per user request
 
@@ -1341,19 +992,30 @@ WHERE prev_year IS NOT NULL
 
                                 # Execute the sanitized SQL
                                 df = run_sql(engine, safe_sql)
-                                st.caption("Executed SQL:")
-                                # show the actual SQL executed (may differ from editable text if sanitized)
-                                st.code(safe_sql, language="sql")
+
                                 if df is None or df.empty:
                                     st.info("Query returned no rows.")
                                 else:
-                                    if df.shape[0] > int(max_rows):
-                                        st.warning(f"Query returned {df.shape[0]} rows; showing first {max_rows}.")
-                                        st.dataframe(df.head(int(max_rows)))
-                                    else:
-                                        st.dataframe(df)
-                                    # Render a sample visualization for this question if applicable
-                                    render_sample_viz(q['id'], df)
+                                    left_col, mid_col, right_col = st.columns([1, 1, 1])
+                                    with left_col:
+                                        st.caption("Executed SQL")
+                                        # show the actual SQL executed (may differ from editable text if sanitized)
+                                        st.code(safe_sql, language="sql")
+
+                                    with mid_col:
+                                        st.caption("Table preview")
+                                        if df.shape[0] > int(max_rows):
+                                            st.warning(f"Query returned {df.shape[0]} rows; showing first {max_rows}.")
+                                            st.dataframe(df.head(int(max_rows)), use_container_width=True)
+                                        else:
+                                            st.dataframe(df, use_container_width=True)
+
+                                    with right_col:
+                                        st.caption("Sample visualization")
+                                        try:
+                                            render_sample_viz(q['id'], df)
+                                        except Exception as viz_e:
+                                            st.write(f"Visualization failed: {viz_e}")
                             except Exception as e:
                                 st.error(f"Failed to execute query: {e}")
 
@@ -1364,3 +1026,5 @@ WHERE prev_year IS NOT NULL
 
 if __name__ == "__main__":
     main()
+      
+      
