@@ -760,7 +760,8 @@ def main():
     except Exception:
         current_index = 0
 
-    sel = st.radio("", pages, index=current_index, horizontal=True, key="page_radio")
+    # Use a non-empty label for accessibility, but hide it visually
+    sel = st.radio("Page selector", pages, index=current_index, horizontal=True, key="page_radio", label_visibility="collapsed")
     # keep a stable alias for other code
     st.session_state["selected_page"] = sel
     page = sel
